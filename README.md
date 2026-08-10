@@ -5,11 +5,9 @@
 <img width="800" alt="image" src="https://github.com/user-attachments/assets/b79c5d10-d279-4b2b-abf7-da37e3967146" />
 
 
-## Agent Skills
+## Architecture
 
-[Agent Skills](https://agentskills.io/specification)은 AI agent에게 특정 작업 수행 방법을 가르치는 재사용 가능한 지침 패키지입니다. Agent skills는 효과적으로 context를 관리하기 위하여 discovery, activation, execution의 과정을 거칩니다. 정리하면 agent가 관련된 skill의 name과 description을 읽는 discovery를 수행한 후에, SKILL.md에 포함된 instruction을 읽는 activation을 수행합니다. Agent는 instruction을 수행하는데 필요하다면 관련된 파일(referenced file)을 읽거나 포함된 코드(bundled code)를 실행합니다. 각 스킬은 `SKILL.md` 파일로 구성되며, YAML 프론트매터(name, description)와 상세 지침(워크플로, 코드 패턴 등)으로 이루어져 있습니다.
-
-### Operation Architecture
+전체적인 동작은 아래를 참조합니다. 
 
 ```mermaid
 flowchart TB
@@ -50,7 +48,7 @@ flowchart TB
 
   subgraph Storage["Artifacts / S3 / Neptune"]
     ART[artifacts/]
-    S3[(S3 docs/{projectName}/)]
+    S3[("S3 docs/<projectName>/")]
     NA[(Neptune Analytics)]
   end
 
@@ -83,270 +81,6 @@ flowchart TB
 | RAG Upload | `api/routes_rag` → Bedrock KB sync | 문서 업로드 후 GraphRAG 인제스션 |
 | Config | `api/routes_config` | 모델·Skill·MCP 선택 |
 
-### Progressive Disclosure
-
-시스템 프롬프트에는 스킬의 **이름과 설명만** XML 형태로 포함하고, 상세 지침은 agent가 `get_skill_instructions` 도구를 호출하여 **필요할 때만** 로드합니다. 이를 통해 프롬프트 크기를 최소화하면서도 agent가 다양한 스킬을 활용할 수 있습니다.
-
-```xml
-<available_skills>
-  <skill>
-    <name>pdf</name>
-    <description>PDF 파일 읽기/병합/분할/OCR/폼 처리 등</description>
-  </skill>
-  ...
-</available_skills>
-```
-
-### 스킬의 구조
-
-각 스킬은 `SKILL.md` 파일 하나가 핵심이며, 필요에 따라 `scripts/`, `references/`, `assets/` 등의 보조 폴더를 포함할 수 있습니다.
-
-```text
-skills/
-├── pdf/
-│   ├── SKILL.md          # YAML 프론트매터 + 상세 지침
-│   └── assets/           # 폰트 등 보조 리소스
-├── notion/
-│   └── SKILL.md
-└── xlsx/
-    └── SKILL.md
-```
-
-`SKILL.md`는 아래와 같이 YAML 프론트매터와 마크다운 본문으로 구성됩니다.
-
-```markdown
----
-name: pdf
-description: PDF 파일 처리를 위한 스킬
----
-
-# PDF Processing Guide
-
-## Overview
-이 가이드는 Python 라이브러리를 사용한 PDF 처리 작업을 다룹니다.
-execute_code 도구로 아래의 Python 코드를 실행하세요.
-...
-```
-
-### 스킬의 종류
-
-스킬은 **베이스 스킬**과 **플러그인 스킬** 두 가지로 구분됩니다.
-
-- **베이스 스킬** (`application/skills/`): Agent 모드에서 공통으로 사용하는 스킬입니다. 플러그인 모드에서도 기본으로 병합되어 함께 제공됩니다.
-
-| 스킬 | 설명 |
-|------|------|
-| pdf | PDF 읽기/병합/분할/OCR/폼 처리 |
-| notion | Notion API를 통한 페이지/DB/블록 관리 |
-| memory-manager | MEMORY.md 기반 대화 메모리 관리 |
-| docx | Word 문서 생성/편집/분석 |
-| xlsx | 스프레드시트 작업/모델링 |
-| pptx | PowerPoint 읽기/편집/생성 |
-| myslide | AWS 테마 프레젠테이션 생성 |
-| retrieve | Bedrock Knowledge Base GraphRAG 검색 (Neptune Analytics) |
-| skill-creator | 새로운 스킬 설계/패키징 가이드 |
-
-- **플러그인 스킬** (`application/plugins/<플러그인명>/skills/`): 특정 플러그인 모드에서만 활성화되는 스킬입니다.
-
-| 플러그인 | 스킬 | 설명 |
-|----------|------|------|
-| productivity | memory-management | 약어/별칭 해석 포함 메모리 관리 |
-| productivity | task-management | TASKS.md 기반 작업 관리 |
-| frontend-design | frontend-design | 프론트엔드 UI 구현 가이드 |
-| enterprise-search | search-strategy | 질의 분해/다중 소스 검색 전략 |
-| enterprise-search | knowledge-synthesis | 다중 소스 결과 통합/출처 부여 |
-| enterprise-search | source-management | MCP 검색 소스 연결/우선순위 |
-
-### 스킬의 동작 흐름
-
-[skill.py](./application/skill.py)에서 구현된 스킬의 동작 흐름은 다음과 같습니다.
-
-1. **스킬 탐색**: `SkillManager`가 스킬 디렉토리를 스캔하여 `SKILL.md`의 YAML 프론트매터(이름, 설명)를 레지스트리에 등록합니다.
-2. **프롬프트 구성**: `build_skill_prompt()`가 활성화된 스킬의 이름/설명을 `<available_skills>` XML로 시스템 프롬프트에 포함합니다.
-3. **지침 로드**: 사용자 요청에 맞는 스킬이 있으면 agent가 `get_skill_instructions` 도구를 호출하여 상세 지침을 로드합니다.
-4. **작업 수행**: 로드된 지침에 따라 `execute_code`, `write_file` 등의 도구를 사용하여 작업을 수행합니다.
-5. **결과 전달**: 결과 파일이 있으면 `upload_file_to_s3`로 업로드하여 URL을 제공합니다.
-
-활성화할 스킬은 `favorite_tools.json`의 기본값과 Web UI Task 설정에서 선택할 수 있습니다.
-
-
-
-## LangGraph에서 Skill의 구현
-
-[langgraph_agent.py](./application/langgraph_agent.py)의 `run_langgraph_agent`는 사용자의 요청(query)를 Agent를 이용해 수행합니다. Web UI Task에서 선택한 MCP 서버·Skill 목록으로 MCP client와 built-in tool을 구성합니다. built-in tool에는 skill을 위한 `get_skill_instructions`와 `execute_code`, `write_file`, `read_file` 등이 있습니다.
-
-```python
-async def run_langgraph_agent(query, mcp_servers):
-    mcp_json = mcp_config.load_selected_config(mcp_servers)
-    server_params = langgraph_agent.load_multiple_mcp_server_parameters(mcp_json)
-
-    client = MultiServerMCPClient(server_params)        
-    tools = await client.get_tools()
-
-    builtin_tools = langgraph_agent.get_builtin_tools()
-    tools = tools + builtin_tools
-        
-    app = langgraph_agent.buildChatAgent(tools)
-    config = {
-        "recursion_limit": 50,
-        "configurable": {"thread_id": user_id},
-        "tools": tools,
-        "system_prompt": None
-    }            
-    inputs = {
-        "messages": [HumanMessage(content=query)]
-    }
-            
-    result = ""
-    async for stream in app.astream(inputs, config, stream_mode="messages"):
-        message = stream[0]    
-        for content_item in message.content:
-            if content_item.get('type') == 'text':
-                text_content = content_item.get('text', '')
-                result += text_content
-                                
-    return result
-```
-
-[langgraph_agent.py](./application/langgraph_agent.py)의 get_builtin_tools은 skill과 관련된 tool 들의 리스트를 리턴합니다. 이 tool중에 get_skill_instructions은 등록된 skill에 대한 정보를 리턴합니다.
-
-```python
-def get_builtin_tools():
-    """Return the list of built-in tools for the skill-aware agent."""
-    return [execute_code, write_file, read_file, upload_file_to_s3, get_skill_instructions]
-
-@tool
-def get_skill_instructions(skill_name: str) -> str:
-    """Load the full instructions for a specific skill by name.
-
-    Use this when you need detailed instructions for a task that matches
-    one of the available skills listed in the system prompt.
-
-    Args:
-        skill_name: The name of the skill to load (e.g. 'pdf').
-
-    Returns:
-        The full skill instructions, or an error message if not found.
-    """
-    instructions = skill_manager.get_skill_instructions(skill_name)
-    if instructions:
-        return instructions
-    available = ", ".join(skill_manager.registry.keys())
-    return f"Skill '{skill_name}'을 찾을 수 없습니다. 사용 가능한 skill: {available}"
-```
-
-[langgraph_agent.py](./application/langgraph_agent.py)에서는 Skill을 관리하기 위한 SkillManager를 정의합니다. SkillManager가 initiate될 때에 _discover()는 skill directory에 있는 skill 정보를 가져와서 registry에 등록합니다. 등록된 skill 정보는  available_skills_xml를 통해 prompt에서 활용합니다. 
-
-```python
-@dataclass
-class Skill:
-    name: str
-    description: str
-    instructions: str
-    path: str
-
-class SkillManager:
-    """Discovers, loads and selects Agent Skills following the Anthropic spec."""
-
-    def __init__(self, skills_dir: str = SKILLS_DIR):
-        self.registry: dict[str, Skill] = {}
-        self._discover()
-
-    def _discover(self):
-        """Scan skills directory and load metadata (frontmatter only)."""
-        for entry in os.listdir(self.skills_dir):
-            skill_md = os.path.join(self.skills_dir, entry, "SKILL.md")
-            if os.path.isfile(skill_md):
-                meta, instructions = self._parse_skill_md(skill_md)
-                skill = Skill(
-                    name=meta.get("name", entry),
-                    description=meta.get("description", ""),
-                    instructions=instructions,
-                    path=os.path.join(self.skills_dir, entry),
-                )
-                self.registry[skill.name] = skill
-
-    # ---- prompt generation (progressive disclosure) ----
-    def available_skills_xml(self) -> str:
-        """Generate <available_skills> XML for the system prompt (metadata only)."""
-        if not self.registry:
-            return ""
-        lines = ["<available_skills>"]
-        for s in self.registry.values():
-            lines.append("  <skill>")
-            lines.append(f"    <name>{s.name}</name>")
-            lines.append(f"    <description>{s.description}</description>")
-            lines.append("  </skill>")
-        lines.append("</available_skills>")
-        return "\n".join(lines)
-
-    def get_skill_instructions(self, name: str) -> Optional[str]:
-        """Return full instructions for a skill (loaded on demand)."""
-        skill = self.registry.get(name)
-        return skill.instructions if skill else None
-
-skill_manager = SkillManager()
-```
-
-LangGraph의 agent는 아래와 같이 구현합니다. 여기서 build_system_prompt은 SKILL에 대한 정보인 skills_xml과 SKILL_USAGE_GUIDE를 아래와 같이 포함합니다.
-
-```python
-async def call_model(state: State, config):
-    last_message = state['messages'][-1]
-
-    tools = config.get("configurable", {}).get("tools", None)
-    custom_prompt = config.get("configurable", {}).get("system_prompt", None)
-
-    system = build_system_prompt(custom_prompt)
-
-    chatModel = chat.get_chat()
-    model = chatModel.bind_tools(tools)
-
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", system),
-        MessagesPlaceholder(variable_name="messages"),
-    ])
-    chain = prompt | model
-    response = await chain.ainvoke(messages)
-    return {"messages": [response], "image_url": image_url}
-
-SKILL_USAGE_GUIDE = (
-    "\n## Skill 사용 가이드\n"
-    "위의 <available_skills>에 나열된 skill이 사용자의 요청과 관련될 때:\n"
-    "1. 먼저 get_skill_instructions 도구로 해당 skill의 상세 지침을 로드하세요.\n"
-    "2. 지침에 포함된 코드 패턴을 execute_code 도구로 실행하세요.\n"
-    "3. 생성된 파일은 upload_file_to_s3로 업로드하고 URL을 사용자에게 전달하세요.\n"
-    "4. skill 지침이 없는 일반 질문은 직접 답변하세요.\n"
-)
-def build_system_prompt(custom_prompt: Optional[str] = None) -> str:
-    """Assemble the full system prompt with available skills metadata."""
-    if custom_prompt:
-        base = custom_prompt
-    else:
-        base = BASE_SYSTEM_PROMPT
-
-    skills_xml = skill_manager.available_skills_xml()
-    if skills_xml:
-        return f"{base}\n\n{skills_xml}\n{SKILL_USAGE_GUIDE}"
-    return base
-```
-
-
-### Skill의 생성
-
-OpenClaw의 [skill-creator](./application/skills/skill-creator/SKILL.md)를 참조하여 skill을 생성할 수 있도록 하였습니다.
-
-```text
-├── SKILL.md (must required)
-│   ├── YAML frontmatter metadata (required)
-│   │   ├── name: (required)
-│   │   └── description: (required)
-│   └── Markdown instructions (required)
-└── Bundled Resources (optional)
-    ├── scripts/          - Executable code (Python/Bash/etc.)
-    ├── references/       - Documentation intended to be loaded into context as needed
-    └── assets/           - Files used in output (templates, icons, fonts, etc.)
-```
 
 
 ## Graph RAG
@@ -357,7 +91,7 @@ OpenClaw의 [skill-creator](./application/skills/skill-creator/SKILL.md)를 참�
 
 ```mermaid
 flowchart LR
-    S3[(S3 docs/{projectName}/)] --> KB["Bedrock Knowledge Base"]
+    S3[("S3 docs/<projectName>/")] --> KB["Bedrock Knowledge Base"]
   KB -->|파싱·청킹·임베딩| NA["Neptune Analytics"]
   KB -->|Entity/Relation 추출| NA
   Q[사용자 질의] --> RET["bedrock-agent-runtime Retrieve"]
@@ -596,158 +330,86 @@ OpenSearch Serverless RAG와 Neptune Analytics GraphRAG의 월간 운영비를 �
 **정리**: 순수 인프라 비용만 보면 OpenSearch Serverless가 유리합니다. 다만 Multi-hop 추론·엔티티 관계·크로스 도큐먼트 분석이 필요하면 Neptune GraphRAG의 추가 비용을 감수할 가치가 있습니다. 이 프로젝트는 후자(GraphRAG)를 기본으로 합니다.
 
 
-## 배포하기
+## MCP
 
-아래와 같이 git source를 가져옵니다.
+Settings에서 **knowledge base** MCP를 선택하면 LangGraph Agent가 stdio로 `mcp_server_retrieve.py`를 띄우고, 도구 `retrieve`로 GraphRAG Knowledge Base를 조회합니다. UI 표시명은 `knowledge base`, `mcp_config.load_config()` 내부 키는 `kb-retriever`입니다.
+
+```text
+Agent (langgraph_agent)
+  → mcp_config.load_config("knowledge base")
+  → python mcp_server_retrieve.py  (FastMCP, transport=stdio)
+  → @mcp.tool retrieve(keyword)
+  → mcp_retrieve.retrieve(query)
+  → bedrock-agent-runtime Retrieve API
+  → Neptune Analytics GraphRAG (벡터 검색 + Entity 그래프 순회)
+```
+
+### `mcp_server_retrieve.py` — MCP 서버 래퍼
+
+FastMCP 서버 `mcp-retrieve`를 정의하고, 도구 하나만 노출합니다. 실제 검색 로직은 전부 `mcp_retrieve`에 위임합니다.
+
+| 구성 | 설명 |
+|------|------|
+| `mcp = FastMCP(name="mcp-retrieve")` | MCP 서버 인스턴스 |
+| `@mcp.tool() retrieve(keyword: str) -> str` | Agent가 호출하는 도구. docstring이 도구 설명으로 전달됨 |
+| `mcp.run(transport="stdio")` | `__main__`에서 stdio로 실행 |
 
 ```python
-git clone https://github.com/kyopark2014/graph-rag
+# application/mcp_server_retrieve.py
+@mcp.tool()
+def retrieve(keyword: str) -> str:
+    """Query the knowledge base with GraphRAG (Neptune Analytics). ..."""
+    return mcp_retrieve.retrieve(keyword)
 ```
 
-아래와 같이 installer.py를 이용해 설치를 시작합니다. Neptune Analytics 그래프와 Bedrock Knowledge Base(GraphRAG)가 함께 생성됩니다. S3 / CloudFront / Web Search Gateway는 agent-skills와 동일한 공용 리소스를 재사용합니다.
+### `mcp_retrieve.py` — Bedrock Retrieve 구현
+
+모듈 로드 시 `config.json`에서 `region`, `projectName`, `knowledge_base_id` / `knowledge_base_name`, `sharing_url`을 읽고 `bedrock-agent-runtime` 클라이언트를 생성합니다. (config에 AWS 키가 있으면 명시 credential, 없으면 IAM/환경 기본값)
+
+| 함수 | 역할 |
+|------|------|
+| `load_config()` | `application/config.json` 로드 |
+| `_resolve_knowledge_base_id()` | 이름으로 KB를 찾아 `knowledge_base_id`를 config에 갱신 |
+| `retrieve(query)` | `Retrieve` API 호출 후 JSON 문자열로 반환 |
+
+**`retrieve(query)` 흐름**
+
+1. `bedrock_agent_runtime_client.retrieve()` 호출  
+   - `retrievalQuery.text` = 질의  
+   - `knowledgeBaseId` = config의 ID  
+   - `numberOfResults` = 5 (기본)
+2. `ResourceNotFoundException`이면 `_resolve_knowledge_base_id()`로 ID를 재조회한 뒤 1회 재시도
+3. 각 `retrievalResults` 항목을 정규화:
+
+```json
+{
+  "contents": "<chunk text>",
+  "reference": {
+    "url": "<CloudFront sharing_url>/docs/<projectName>/<file>",
+    "title": "<파일명>",
+    "from": "GraphRAG",
+    "page": 1
+  }
+}
+```
+
+- S3 location → `sharing_url` + `docs/{projectName}/`로 다운로드 URL 구성  
+- Bedrock 페이지 번호(`x-amz-bedrock-kb-document-page-number`, 0-based) → 표시용 1-based `page`  
+- `from`은 항상 `"GraphRAG"` (Neptune GraphRAG 경로임을 UI/인용에 표시)
+
+반환값은 `json.dumps([...], ensure_ascii=False)` 문자열이라 MCP ToolMessage로 Agent에 그대로 전달됩니다.
+
+### 등록 (`mcp_config.py`)
 
 ```python
-cd graph-rag && python3 installer.py
+# mcp_type "knowledge base" → "kb-retriever"
+"kb_retriever": {
+    "command": "python",
+    "args": [f"{workingDir}/mcp_server_retrieve.py"]
+}
 ```
 
-인프라가 더이상 필요없을 때에는 Knowledge Base를 먼저 삭제한 뒤 Neptune 그래프를 삭제합니다. S3 / CloudFront / Web Search는 공용 리소스이므로 기본값이 유지(N)이며, 삭제하려면 프롬프트에서 Y를 입력하거나 `--delete-s3-bucket` / `--delete-cloudfront` / `--delete-agentcore-gateway` 플래그를 사용합니다.
-
-```text
-python uninstaller.py --delete-knowledge-base --delete-neptune
-```
-
-### 실행하기
-
-AWS 환경을 잘 활용하기 위해서는 [AWS CLI를 설치](https://docs.aws.amazon.com/ko_kr/cli/v1/userguide/cli-chap-install.html)하여야 합니다. EC2에서 배포하는 경우에는 별도로 설치가 필요하지 않습니다. Local에 설치시는 아래 명령어를 참조합니다.
-
-```text
-curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip" 
-unzip awscliv2.zip
-sudo ./aws/install
-```
-
-AWS credential을 아래와 같이 AWS CLI를 이용해 등록합니다.
-
-```text
-aws configure
-```
-
-설치하다가 발생하는 각종 문제는 [Kiro-cli](https://aws.amazon.com/ko/blogs/korea/kiro-general-availability/)를 이용해 빠르게 수정합니다. 아래와 같이 설치할 수 있지만, Windows에서는 [Kiro 설치](https://kiro.dev/downloads/)에서 다운로드 설치합니다. 실행시는 셀에서 "kiro-cli"라고 입력합니다. 
-
-```python
-curl -fsSL https://cli.kiro.dev/install | bash
-```
-
-venv로 환경을 구성하면 편리하게 패키지를 관리합니다. 아래와 같이 환경을 설정합니다.
-
-```text
-python -m venv .venv
-source .venv/bin/activate
-```
-
-이후 다운로드 받은 github 폴더로 이동한 후에 아래와 같이 필요한 패키지를 추가로 설치 합니다.
-
-```text
-pip install -r requirements.txt
-```
-
-이후 아래와 같이 Web UI를 빌드하고 FastAPI를 실행합니다.
-
-```text
-# 프론트 빌드 후 uvicorn (포트 8501)
-./run_local.sh
-
-# 또는 수동
-cd application/web && npm install && npm run build && cd ../..
-uvicorn application.server:app --host 0.0.0.0 --port 8501
-```
-
-개발 시 Vite 핫리로드:
-
-```text
-# 터미널 1
-uvicorn application.server:app --host 0.0.0.0 --port 8501
-
-# 터미널 2
-cd application/web && npm run dev   # http://localhost:5173  (/api → :8501 프록시)
-```
-
-### MCP
-
-Plugin의 Connector는 MCP를 이용해 구현합니다. 이때 필요한 MCP 설정은 아래를 참조합니다. 
-
-- [Slack](https://github.com/kyopark2014/mcp/blob/main/mcp-slack.md): Slack 내용을 조회하고 메시지를 보낼 수 있습니다. SLACK_TEAM_ID, SLACK_BOT_TOKEN으로 설정합니다.
-
-- [Tavily](https://github.com/kyopark2014/mcp/blob/main/mcp-tavily.md): Tavily를 이용해 인터넷을 검색합니다. [installer.py](./installer.py)에서 secret으로 설정후에 [utils.py](./application/utils.py)에서 TAVILY_API_KEY로 등록하여 활용합니다.
-
-- [knowledge base](./application/mcp_server_retrieve.py): Bedrock Knowledge Base GraphRAG(Neptune Analytics)로 검색합니다. IAM 인증을 이용하므로 별도로 credential 설정하지 않습니다. 자세한 구성은 [Graph RAG](#graph-rag)를 참고하세요.
-
-- [web_fetch](https://github.com/kyopark2014/mcp/blob/main/mcp-web-fetch.md): playwright기반으로 url의 문서를 markdown으로 불러올 수 있습니다. 별도 인증이 필요하지 않습니다.
-
-- [Google 메일/캘린더](https://github.com/kyopark2014/mcp/blob/main/mcp-gog.md): 구글 메일을 조회하거나 보낼 수 있습니다. Gog CLI를 설치하여 google 인증을 통해 활용합니다.
-
-- [Notion](https://github.com/kyopark2014/mcp/blob/main/mcp-notion.md): Notion을 읽거나 쓸 수 있습니다. [installer.py](./installer.py)에서 secret으로 설정후에 [utils.py](./application/utils.py)에서 NOTION_TOKEN을 등록하여 활용합니다.
-
-- [text_extraction](https://github.com/kyopark2014/mcp/blob/main/mcp-text-extraction.md): 이미지의 텍스트를 추출합니다. 별도 인증이 필요하지 않습니다.
-
-
-
-### Message Trim
-
-LangGraph 에이전트([application/langgraph_agent.py](./application/langgraph_agent.py)의 `call_model`)는 LLM 호출 직전에 **HumanMessage 기준 최근 N턴**만 남깁니다. LangGraph state의 `messages`는 checkpointer에 그대로 두고, **모델에 넘기는 메시지만** trim합니다. `history_mode=Enable`/`Disable` 모두 동일하게 적용됩니다.
-
-**기본값:** `MAX_CONTEXT_TURNS = 5` (일반 채팅의 `SimpleMemory(k=5)`와 동일한 “최근 5턴” 의도)
-
-**설정 변경:**
-
-- [application/langgraph_agent.py](./application/langgraph_agent.py)의 `MAX_CONTEXT_TURNS` 상수 수정
-- 또는 `create_agent()`에서 생성하는 config의 `max_turns` / `configurable.max_turns` 지정
-- `max_turns=0`이면 trim 비활성화
-
-상수와 trim 함수는 `langgraph_agent.py`에 정의합니다.
-
-```python
-# application/langgraph_agent.py
-MAX_CONTEXT_TURNS = 5
-
-
-def trim_messages_by_human_turns(messages: list, max_turns: int) -> list:
-    """Keep messages from the last N HumanMessage turns (inclusive)."""
-    if max_turns <= 0 or not messages:
-        return messages
-
-    human_indices = [i for i, msg in enumerate(messages) if isinstance(msg, HumanMessage)]
-    if len(human_indices) <= max_turns:
-        return messages
-
-    return messages[human_indices[-max_turns]:]
-```
-
-`call_model`에서는 `ToolMessage` content 정규화 후 trim을 적용합니다.
-
-```python
-# application/langgraph_agent.py — call_model() 내부
-        max_turns = (
-            config.get("configurable", {}).get("max_turns")
-            or config.get("max_turns")
-            or MAX_CONTEXT_TURNS
-        )
-        trimmed = trim_messages_by_human_turns(messages, max_turns)
-        if len(trimmed) < len(messages):
-            logger.info(
-                f"trimmed messages from {len(messages)} to {len(trimmed)} "
-                f"(max_turns={max_turns})"
-            )
-            messages = trimmed
-
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", system),
-            MessagesPlaceholder(variable_name="messages"),
-        ])
-        chain = prompt | model
-        async for chunk in chain.astream({"messages": messages}):
-            ...
-```
+## Agent
 
 에이전트 config는 `create_agent()`에서 생성하며, `history_mode`와 관계없이 `max_turns`를 전달합니다.
 
@@ -864,6 +526,82 @@ resp = client.execute_query(
 | 계층적 청킹 사용 시 | GraphRAG는 child chunk만 검색(parent로 치환 안 됨) |
 | 시각화 툴 | Neptune 콘솔의 오픈소스 **Graph Explorer**로도 그래프 탐색·시각화 가능(자연어 질의는 미지원, 순수 탐색용) |
 
+
+## 배포하기
+
+아래와 같이 git source를 가져옵니다.
+
+```python
+git clone https://github.com/kyopark2014/graph-rag
+```
+
+아래와 같이 installer.py를 이용해 설치를 시작합니다. Neptune Analytics 그래프와 Bedrock Knowledge Base(GraphRAG)가 함께 생성됩니다. S3 / CloudFront / Web Search Gateway는 agent-skills와 동일한 공용 리소스를 재사용합니다.
+
+```python
+cd graph-rag && python3 installer.py
+```
+
+인프라가 더이상 필요없을 때에는 Knowledge Base를 먼저 삭제한 뒤 Neptune 그래프를 삭제합니다. S3 / CloudFront / Web Search는 공용 리소스이므로 기본값이 유지(N)이며, 삭제하려면 프롬프트에서 Y를 입력하거나 `--delete-s3-bucket` / `--delete-cloudfront` / `--delete-agentcore-gateway` 플래그를 사용합니다.
+
+```text
+python uninstaller.py --delete-knowledge-base --delete-neptune
+```
+
+### 실행하기
+
+AWS 환경을 잘 활용하기 위해서는 [AWS CLI를 설치](https://docs.aws.amazon.com/ko_kr/cli/v1/userguide/cli-chap-install.html)하여야 합니다. EC2에서 배포하는 경우에는 별도로 설치가 필요하지 않습니다. Local에 설치시는 아래 명령어를 참조합니다.
+
+```text
+curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip" 
+unzip awscliv2.zip
+sudo ./aws/install
+```
+
+AWS credential을 아래와 같이 AWS CLI를 이용해 등록합니다.
+
+```text
+aws configure
+```
+
+설치하다가 발생하는 각종 문제는 [Kiro-cli](https://aws.amazon.com/ko/blogs/korea/kiro-general-availability/)를 이용해 빠르게 수정합니다. 아래와 같이 설치할 수 있지만, Windows에서는 [Kiro 설치](https://kiro.dev/downloads/)에서 다운로드 설치합니다. 실행시는 셀에서 "kiro-cli"라고 입력합니다. 
+
+```python
+curl -fsSL https://cli.kiro.dev/install | bash
+```
+
+venv로 환경을 구성하면 편리하게 패키지를 관리합니다. 아래와 같이 환경을 설정합니다.
+
+```text
+python -m venv .venv
+source .venv/bin/activate
+```
+
+이후 다운로드 받은 github 폴더로 이동한 후에 아래와 같이 필요한 패키지를 추가로 설치 합니다.
+
+```text
+pip install -r requirements.txt
+```
+
+이후 아래와 같이 Web UI를 빌드하고 FastAPI를 실행합니다.
+
+```text
+# 프론트 빌드 후 uvicorn (포트 8501)
+./run_local.sh
+
+# 또는 수동
+cd application/web && npm install && npm run build && cd ../..
+uvicorn application.server:app --host 0.0.0.0 --port 8501
+```
+
+개발 시 Vite 핫리로드:
+
+```text
+# 터미널 1
+uvicorn application.server:app --host 0.0.0.0 --port 8501
+
+# 터미널 2
+cd application/web && npm run dev   # http://localhost:5173  (/api → :8501 프록시)
+```
 
 ## 실행 결과
 
