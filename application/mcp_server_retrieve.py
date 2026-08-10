@@ -30,6 +30,8 @@ def retrieve(keyword: str) -> str:
     """
     Query the knowledge base with GraphRAG (Neptune Analytics).
     Uses vector search plus graph traversal over extracted entities/relations.
+    Results are scoped to the current user's uploaded documents only
+    (metadata owner equals filter).
     keyword: the keyword or natural-language query
     return: JSON documents with contents and reference metadata
     """

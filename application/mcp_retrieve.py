@@ -1,4 +1,4 @@
-import boto3 
+import boto3
 import logging
 import sys
 import os
@@ -8,41 +8,38 @@ from botocore.exceptions import ClientError
 
 logging.basicConfig(
     level=logging.INFO,  # Default to INFO level
-    format='%(filename)s:%(lineno)d | %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stderr)
-    ]
+    format="%(filename)s:%(lineno)d | %(message)s",
+    handlers=[logging.StreamHandler(sys.stderr)],
 )
 logger = logging.getLogger("retrieve")
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 config_path = os.path.join(script_dir, "config.json")
 
+
 def load_config():
-    config = None
-    
     with open(config_path, "r", encoding="utf-8") as f:
-        config = json.load(f)    
-    return config
+        return json.load(f)
+
 
 config = load_config()
 
-bedrock_region = config.get('region', 'us-west-2')
-projectName = config.get('projectName')
-knowledge_base_name = config.get('knowledge_base_name') or projectName
-knowledge_base_id = config.get('knowledge_base_id')
+bedrock_region = config.get("region", "us-west-2")
+projectName = config.get("projectName")
+knowledge_base_name = config.get("knowledge_base_name") or projectName
+knowledge_base_id = config.get("knowledge_base_id")
 number_of_results = 5
 
 doc_prefix = f"docs/{projectName}/" if projectName else "docs/"
-path = config.get('sharing_url', '')
+path = config.get("sharing_url", "")
 
-aws_access_key = config.get('aws', {}).get('access_key_id')
-aws_secret_key = config.get('aws', {}).get('secret_access_key')
-aws_session_token = config.get('aws', {}).get('session_token')
+aws_access_key = config.get("aws", {}).get("access_key_id")
+aws_secret_key = config.get("aws", {}).get("secret_access_key")
+aws_session_token = config.get("aws", {}).get("session_token")
 
 if aws_access_key and aws_secret_key:
     bedrock_agent_runtime_client = boto3.client(
-        "bedrock-agent-runtime", 
+        "bedrock-agent-runtime",
         region_name=bedrock_region,
         aws_access_key_id=aws_access_key,
         aws_secret_access_key=aws_secret_key,
@@ -50,7 +47,45 @@ if aws_access_key and aws_secret_key:
     )
 else:
     bedrock_agent_runtime_client = boto3.client(
-        "bedrock-agent-runtime", region_name=bedrock_region)
+        "bedrock-agent-runtime", region_name=bedrock_region
+    )
+
+
+def _current_user_id() -> str:
+    """User id injected into the MCP process env by langgraph_agent.create_agent()."""
+    return (os.environ.get("RAG_USER_ID") or "").strip()
+
+
+def _owner_filter(user_id: str) -> dict:
+    """Filter documents whose STRING ``owner`` equals user_id.
+
+    Neptune Analytics GraphRAG rejects STRING_LIST metadata, so upload stores
+    ``owner`` as STRING and retrieve must use ``equals`` (not listContains).
+    See: https://docs.aws.amazon.com/bedrock/latest/userguide/kb-test-config.html
+    """
+    return {
+        "equals": {
+            "key": "owner",
+            "value": user_id,
+        }
+    }
+
+
+def _retrieval_configuration(user_id: str) -> dict:
+    return {
+        "vectorSearchConfiguration": {
+            "numberOfResults": number_of_results,
+            "filter": _owner_filter(user_id),
+        }
+    }
+
+
+def _call_retrieve(query: str, user_id: str):
+    return bedrock_agent_runtime_client.retrieve(
+        retrievalQuery={"text": query},
+        knowledgeBaseId=knowledge_base_id,
+        retrievalConfiguration=_retrieval_configuration(user_id),
+    )
 
 
 def _resolve_knowledge_base_id() -> str:
@@ -77,38 +112,39 @@ def _resolve_knowledge_base_id() -> str:
 def retrieve(query):
     """Retrieve documents via Bedrock Knowledge Base GraphRAG (Neptune Analytics).
 
-    The Knowledge Base vector store is Neptune Analytics. retrieve() performs
-    vector search plus graph traversal enrichment automatically.
+    Scoped to the current session user via STRING ``owner`` metadata equals filter.
+    The Knowledge Base vector store is Neptune Analytics; retrieve() also performs
+    graph traversal enrichment automatically.
     """
     global knowledge_base_id
-    
-    try:
-        response = bedrock_agent_runtime_client.retrieve(
-            retrievalQuery={"text": query},
-            knowledgeBaseId=knowledge_base_id,
-            retrievalConfiguration={
-                "vectorSearchConfiguration": {"numberOfResults": number_of_results},
-            },
+
+    user_id = _current_user_id()
+    if not user_id:
+        logger.error("RAG_USER_ID is empty; refusing unscoped GraphRAG retrieve")
+        return json.dumps(
+            {"error": "User session required for GraphRAG retrieve"},
+            ensure_ascii=False,
         )
+
+    logger.info("GraphRAG retrieve for user_id=%s query=%s", user_id, query)
+
+    try:
+        response = _call_retrieve(query, user_id)
     except ClientError as e:
         error_code = e.response.get("Error", {}).get("Code", "")
-        
+
         if error_code == "ResourceNotFoundException":
             logger.warning(f"ResourceNotFoundException occurred: {e}")
             logger.info("Attempting to update knowledge_base_id...")
-            
+
             try:
                 _resolve_knowledge_base_id()
-                response = bedrock_agent_runtime_client.retrieve(
-                    retrievalQuery={"text": query},
-                    knowledgeBaseId=knowledge_base_id,
-                    retrievalConfiguration={
-                        "vectorSearchConfiguration": {"numberOfResults": number_of_results},
-                    },
-                )
+                response = _call_retrieve(query, user_id)
                 logger.info("Retry successful after updating knowledge_base_id")
             except Exception as retry_error:
-                logger.error(f"Retry failed after updating knowledge_base_id: {retry_error}")
+                logger.error(
+                    f"Retry failed after updating knowledge_base_id: {retry_error}"
+                )
                 raise
         else:
             logger.error(f"Error retrieving: {e}")
@@ -116,7 +152,7 @@ def retrieve(query):
     except Exception as e:
         logger.error(f"Unexpected error retrieving: {e}")
         raise
-    
+
     retrieval_results = response.get("retrievalResults", [])
 
     json_docs = []
@@ -130,18 +166,28 @@ def retrieve(query):
         if "location" in result:
             location = result["location"]
             if "s3Location" in location:
-                uri = location["s3Location"]["uri"] if location["s3Location"]["uri"] is not None else ""
-                
+                uri = (
+                    location["s3Location"]["uri"]
+                    if location["s3Location"]["uri"] is not None
+                    else ""
+                )
+
                 name = uri.split("/")[-1]
-                encoded_name = parse.quote(name)                
+                encoded_name = parse.quote(name)
                 url = f"{path}/{doc_prefix}{encoded_name}"
-                
+
             elif "webLocation" in location:
-                url = location["webLocation"]["url"] if location["webLocation"]["url"] is not None else ""
+                url = (
+                    location["webLocation"]["url"]
+                    if location["webLocation"]["url"] is not None
+                    else ""
+                )
                 name = "WEB"
 
         page = None
-        raw_page = (result.get("metadata") or {}).get("x-amz-bedrock-kb-document-page-number")
+        raw_page = (result.get("metadata") or {}).get(
+            "x-amz-bedrock-kb-document-page-number"
+        )
         if raw_page is not None:
             try:
                 # Bedrock KB uses 0-based page numbers; convert to 1-based for display
@@ -157,10 +203,12 @@ def retrieve(query):
         if page is not None:
             reference["page"] = page
 
-        json_docs.append({
-            "contents": text,
-            "reference": reference,
-        })
+        json_docs.append(
+            {
+                "contents": text,
+                "reference": reference,
+            }
+        )
     logger.info(f"json_docs: {json_docs}")
 
     return json.dumps(json_docs, ensure_ascii=False)

@@ -110,9 +110,13 @@ def update(
     global model_name, model_id, model_type, debug_mode, reasoning_mode
     global models, user_id, skill_mode, memory_mode
 
-    if userId is not None and user_id != userId:
-        user_id = userId
-        logger.info(f"user_id: {user_id}")
+    if userId is not None:
+        normalized = str(userId).strip()
+        if normalized and user_id != normalized:
+            user_id = normalized
+            logger.info(f"user_id: {user_id}")
+        elif normalized:
+            user_id = normalized
 
     if modelName is not None and model_name != modelName:
         model_name = modelName
@@ -1236,15 +1240,21 @@ number_of_results = 4
 
 def retrieve(query):
     global knowledge_base_id
-    
+
+    owner = (user_id or "").strip()
+    vector_cfg = {"numberOfResults": number_of_results}
+    if owner:
+        # Neptune GraphRAG stores owner as STRING → equals filter
+        vector_cfg["filter"] = {"equals": {"key": "owner", "value": owner}}
+    else:
+        logger.warning("retrieve without user_id; skipping owner metadata filter")
+
     try:
         response = bedrock_agent_runtime_client.retrieve(
             retrievalQuery={"text": query},
             knowledgeBaseId=knowledge_base_id,
-                retrievalConfiguration={
-                    "vectorSearchConfiguration": {"numberOfResults": number_of_results},
-                },
-            )
+            retrievalConfiguration={"vectorSearchConfiguration": vector_cfg},
+        )
     except ClientError as e:
         error_code = e.response.get("Error", {}).get("Code", "")
         
@@ -1277,7 +1287,7 @@ def retrieve(query):
                         retrievalQuery={"text": query},
                         knowledgeBaseId=knowledge_base_id,
                         retrievalConfiguration={
-                            "vectorSearchConfiguration": {"numberOfResults": number_of_results},
+                            "vectorSearchConfiguration": vector_cfg,
                         },
                     )
                     logger.info("Retry successful after updating knowledge_base_id")
@@ -1332,7 +1342,7 @@ def retrieve(query):
         reference = {
             "url": url,
             "title": name,
-            "from": "RAG",
+            "from": "GraphRAG",
         }
         if page is not None:
             reference["page"] = page
@@ -1809,5 +1819,6 @@ def run_agent(
             skill_list=skill_list or [],
             history_mode=history_mode,
             notification_queue=notification_queue,
+            user_id=user_id,
         )
     )
