@@ -95,33 +95,53 @@ reasoning_mode = 'Disable'
 user_id = "agent"
 multi_region = 'Disable'
 
-def update(modelName, debugMode, reasoningMode, skillMode, memoryMode="Disable"):    
+def update(
+    modelName=None,
+    debugMode=None,
+    reasoningMode=None,
+    skillMode=None,
+    memoryMode=None,
+    userId=None,
+    guardrailEnabled=None,
+    llmGatewayEnabled=None,
+    memoryEnabled=None,
+):
+    """Update session knobs. Accepts Streamlit-style and FastAPI-style kwargs."""
     global model_name, model_id, model_type, debug_mode, reasoning_mode
     global models, user_id, skill_mode, memory_mode
 
-    if model_name != modelName:
+    if userId is not None and user_id != userId:
+        user_id = userId
+        logger.info(f"user_id: {user_id}")
+
+    if modelName is not None and model_name != modelName:
         model_name = modelName
         logger.info(f"model_name: {model_name}")
-        
         models = info.get_model_info(model_name)
         model_id = models[0]["model_id"]
         model_type = models[0]["model_type"]
-                                
-    if debug_mode != debugMode:
-        debug_mode = debugMode        
+
+    if debugMode is not None and debug_mode != debugMode:
+        debug_mode = debugMode
         logger.info(f"debug_mode: {debug_mode}")
 
-    if reasoning_mode != reasoningMode:
+    if reasoningMode is not None and reasoning_mode != reasoningMode:
         reasoning_mode = reasoningMode
-        logger.info(f"reasoning_mode: {reasoning_mode}")    
+        logger.info(f"reasoning_mode: {reasoning_mode}")
 
-    if skill_mode != skillMode:
+    if skillMode is not None and skill_mode != skillMode:
         skill_mode = skillMode
         logger.info(f"skill_mode: {skill_mode}")
 
-    if memory_mode != memoryMode:
+    # FastAPI routes pass memoryEnabled bool; Streamlit used memoryMode string.
+    if memoryEnabled is not None:
+        memoryMode = "Enable" if memoryEnabled else "Disable"
+    if memoryMode is not None and memory_mode != memoryMode:
         memory_mode = memoryMode
         logger.info(f"memory_mode: {memory_mode}")
+
+    # Accepted for API compatibility (not used by graph-rag agent yet).
+    _ = guardrailEnabled, llmGatewayEnabled
 
 map_chain = dict() 
 checkpointers = dict() 
@@ -574,7 +594,7 @@ def summary_of_code(code, mode):
 
 fileId = uuid.uuid4().hex
 # print('fileId: ', fileId)
-def get_summary_of_uploaded_file(file_name, st):
+def get_summary_of_uploaded_file(file_name, st=None):
     file_type = file_name[file_name.rfind('.')+1:len(file_name)]            
     logger.info(f"file_type: {file_type}")
     
@@ -636,7 +656,7 @@ def get_summary_of_uploaded_file(file_name, st):
         if debug_mode=="Enable":
             status = "이미지를 가져옵니다."
             logger.info(f"status: {status}")
-            st.info(status)
+            logger.info(status)
             
         image_obj = s3_client.get_object(Bucket=s3_bucket, Key=s3_prefix+'/'+file_name)
         # print('image_obj: ', image_obj)
@@ -690,7 +710,7 @@ def get_summary_of_uploaded_file(file_name, st):
         if debug_mode=="Enable":
             status = "이미지에서 텍스트를 추출합니다."
             logger.info(f"status: {status}")
-            st.info(status)
+            logger.info(status)
         
         text = extract_text(img_base64)
         # print('extracted text: ', text)
@@ -704,12 +724,12 @@ def get_summary_of_uploaded_file(file_name, st):
         if debug_mode=="Enable":
             logger.info(f"### 추출된 텍스트\n\n{extracted_text}")
             print('status: ', status)
-            st.info(status)
+            logger.info(status)
     
         if debug_mode=="Enable":
             status = "이미지의 내용을 분석합니다."
             logger.info(f"status: {status}")
-            st.info(status)
+            logger.info(status)
 
         image_summary = summary_image(img_base64, "")
         logger.info(f"image summary: {image_summary}")
@@ -878,7 +898,7 @@ def show_extended_thinking(st, result):
     if "thinking" in result.response_metadata:
         if "text" in result.response_metadata["thinking"]:
             thinking = result.response_metadata["thinking"]["text"]
-            st.info(thinking)
+            logger.info(thinking)
 
 ####################### LangChain #######################
 # General Conversation
@@ -1056,7 +1076,7 @@ fileId = uuid.uuid4().hex
 ####################### LangChain #######################
 # Image Summarization
 #########################################################
-def summarize_image(image_content, prompt, st):
+def summarize_image(image_content, prompt, st=None):
     img = Image.open(BytesIO(image_content))
     
     width, height = img.size 
@@ -1105,7 +1125,7 @@ def summarize_image(image_content, prompt, st):
     if debug_mode=="Enable":
         status = "이미지에서 텍스트를 추출합니다."
         logger.info(f"status: {status}")
-        st.info(status)
+        logger.info(status)
 
     text = extract_text(img_base64)
     logger.info(f"extracted text: {text}")
@@ -1119,12 +1139,12 @@ def summarize_image(image_content, prompt, st):
     if debug_mode=="Enable":
         status = f"### 추출된 텍스트\n\n{extracted_text}"
         logger.info(f"status: {status}")
-        st.info(status)
+        logger.info(status)
     
     if debug_mode=="Enable":
         status = "이미지의 내용을 분석합니다."
         logger.info(f"status: {status}")
-        st.info(status)
+        logger.info(status)
 
     image_summary = summary_image(img_base64, prompt)
     
@@ -1325,14 +1345,14 @@ def retrieve(query):
 
     return json.dumps(json_docs, ensure_ascii=False)
  
-def run_rag_with_knowledge_base(query, st):
+def run_rag_with_knowledge_base(query, st=None):
     global reference_docs, contentList
     reference_docs = []
     contentList = []
 
     # retrieve
     if debug_mode == "Enable":
-        st.info(f"RAG 검색을 수행합니다. 검색어: {query}")  
+        logger.info(f"RAG 검색을 수행합니다. 검색어: {query}")  
 
     json_docs = retrieve(query)    
     logger.info(f"json_docs: {json_docs}")
@@ -1344,7 +1364,7 @@ def run_rag_with_knowledge_base(query, st):
         relevant_context += f"{doc['contents']}\n\n"
 
     # change format to document
-    st.info(f"{len(relevant_docs)}개의 관련된 문서를 얻었습니다.")
+    logger.info(f"{len(relevant_docs)}개의 관련된 문서를 얻었습니다.")
 
     rag_chain = get_rag_prompt(query)
                        
@@ -1388,7 +1408,7 @@ def extract_thinking_tag(response, st):
         logger.info(f"gent_thinking: {status}")
         
         if debug_mode=="Enable":
-            st.info(status)
+            logger.info(status)
 
         if response.find('<thinking>') == 0:
             msg = response[response.find('</thinking>')+12:]
@@ -1715,3 +1735,79 @@ def get_tool_info(tool_name, tool_content):
 
     return content, urls, tool_references
 
+
+
+import asyncio
+import threading
+
+_agent_loop = None
+_agent_loop_lock = threading.Lock()
+
+
+def _get_agent_loop():
+    global _agent_loop
+    with _agent_loop_lock:
+        if _agent_loop is None or _agent_loop.is_closed():
+            _agent_loop = asyncio.new_event_loop()
+
+            def _runner(loop):
+                asyncio.set_event_loop(loop)
+                loop.run_forever()
+
+            t = threading.Thread(target=_runner, args=(_agent_loop,), daemon=True, name="graph-rag-agent-loop")
+            t.start()
+        return _agent_loop
+
+
+def _run_on_agent_loop(coro):
+    loop = _get_agent_loop()
+    future = asyncio.run_coroutine_threadsafe(coro, loop)
+    return future.result()
+
+
+def run_agent(
+    prompt,
+    user_id,
+    mcp_servers,
+    model_name,
+    runtime_session_id,
+    notification_queue=None,
+    skill_list=None,
+    guardrail_enabled=None,
+    llm_gateway_enabled=None,
+    memory_enabled=None,
+    files=None,
+):
+    """Sync entry used by FastAPI routes: update session then run LangGraph."""
+    import langgraph_agent
+
+    update(
+        userId=user_id,
+        modelName=model_name,
+        debugMode="Enable",
+        skillMode="Enable",
+        memoryMode="Enable" if memory_enabled else "Disable",
+        memoryEnabled=memory_enabled,
+        guardrailEnabled=guardrail_enabled,
+        llmGatewayEnabled=llm_gateway_enabled,
+    )
+
+    if notification_queue is not None:
+        notification_queue.reset()
+
+    # Attach image URLs to the prompt when present (multimodal via agent tools / text hint).
+    query = prompt or ""
+    file_urls = [u for u in (files or []) if u]
+    if file_urls:
+        query = (query + "\n\n" if query else "") + "Attached files:\n" + "\n".join(file_urls)
+
+    history_mode = "Enable" if memory_enabled else "Disable"
+    return _run_on_agent_loop(
+        langgraph_agent.run_langgraph_agent(
+            query=query,
+            mcp_servers=mcp_servers or [],
+            skill_list=skill_list or [],
+            history_mode=history_mode,
+            notification_queue=notification_queue,
+        )
+    )

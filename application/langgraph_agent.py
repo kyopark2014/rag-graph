@@ -25,7 +25,10 @@ from pytz import timezone
 from langchain_core.tools import tool
 from urllib import parse
 from urllib import parse as url_parse
-from notification_queue import NotificationQueue
+try:
+    from notification_queue import QueueNotificationSink as NotificationQueue
+except ImportError:
+    NotificationQueue = None  # type: ignore
 
 logging.basicConfig(
     level=logging.INFO,
@@ -1148,7 +1151,7 @@ def _format_references_markdown(references: list) -> str:
     return "\n".join(lines) + "\n"
 
 
-async def run_langgraph_agent(query: str, mcp_servers: list, skill_list: list, history_mode: str="Disable", notification_queue: NotificationQueue =None) -> tuple[str, list]:
+async def run_langgraph_agent(query: str, mcp_servers: list, skill_list: list, history_mode: str="Disable", notification_queue=None) -> tuple[str, list]:
     global app, config, active_mcp_servers, active_skills, active_skill_mode, active_memory_mode, current_id
     
     queue = notification_queue if notification_queue else None

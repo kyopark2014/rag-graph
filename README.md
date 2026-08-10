@@ -1,6 +1,6 @@
 # GraphRAG와 함께 Agent 구현하기
 
-Agent는 MCP뿐 아니라 [Skill](https://github.com/anthropics/skills)을 활용하여 다양한 기능을 편리하게 구현할 수 있습니다. 여기에서는 [LangGraph](https://www.langchain.com/langgraph)에서 Agent skill을 활용하는 방법에 대해 설명합니다. RAG는 Amazon Bedrock Knowledge Bases GraphRAG로 구성하며, Streamlit을 이용헤 app을 구현하고, LangGraph Agent에 MCP와 Skills를 연결합니다. 인터넷 검색은 AgentCore Gateway를 이용한 websearch를 이용해 구현됩니다.
+Agent는 MCP뿐 아니라 [Skill](https://github.com/anthropics/skills)을 활용하여 다양한 기능을 편리하게 구현할 수 있습니다. 여기에서는 [LangGraph](https://www.langchain.com/langgraph)에서 Agent skill을 활용하는 방법에 대해 설명합니다. RAG는 Amazon Bedrock Knowledge Bases GraphRAG로 구성하며, **FastAPI + React** Web UI로 앱을 구현하고, LangGraph Agent에 MCP와 Skills를 연결합니다. 인터넷 검색은 AgentCore Gateway를 이용한 websearch를 이용해 구현됩니다.
 
 <img width="800" alt="image" src="https://github.com/user-attachments/assets/ce6878ed-62b8-420d-a04c-928c45583e57" />
 
@@ -13,9 +13,9 @@ Agent는 MCP뿐 아니라 [Skill](https://github.com/anthropics/skills)을 활�
 
 ```mermaid
 flowchart TB
-  subgraph UI["Streamlit (app.py)"]
-    M[대화 모드 선택]
-    SKUI[Skill / MCP 선택]
+  subgraph UI["Web UI FastAPI + React"]
+    SPA["web/ React SPA"]
+    API["/api/tasks · /api/rag · SSE chat"]
   end
 
   subgraph LLM["Amazon Bedrock"]
@@ -54,9 +54,8 @@ flowchart TB
     NA[(Neptune Analytics)]
   end
 
-  M --> RLA
-  SKUI -->|skill_list| BSP
-  SKUI -->|mcp_servers| MCPC
+  SPA --> API
+  API -->|skill_list / mcp_servers / prompt| RLA
 
   RLA --> SG
   SG --> CM
@@ -78,14 +77,11 @@ flowchart TB
   S3 -->|ingestion Sync| NA
 ```
 
-| 모드 | 모듈 | 설명 |
+| UI / API | 모듈 | 설명 |
 |------|------|------|
-| 일상적인 대화 | `chat.general_conversation` | 대화 이력 + ChatBedrock 스트리밍 |
-| RAG | `chat.run_rag_with_knowledge_base` | Bedrock Knowledge Base GraphRAG 검색(`retrieve`) 후 ChatBedrock으로 답변 생성 |
-| **Agent** | `langgraph_agent.run_langgraph_agent` | LangGraph StateGraph + built-in tools + MCP + Skills (단일 턴) |
-| **Agent (Chat)** | `langgraph_agent.run_langgraph_agent` | Agent와 동일 + LangGraph checkpointer로 대화 이력 유지 |
-| 번역하기 | `chat.translate_text` | 한국어 ↔ 영어 번역 |
-| 이미지 분석 | `chat.summarize_image` | ChatBedrock 멀티모달 (이미지 + 텍스트) 분석 |
+| Task Chat (SSE) | `api/routes_chat` → `langgraph_agent.run_langgraph_agent` | Skill + MCP LangGraph Agent, 스트리밍 |
+| RAG Upload | `api/routes_rag` → Bedrock KB sync | 문서 업로드 후 GraphRAG 인제스션 |
+| Config | `api/routes_config` | 모델·Skill·MCP 선택 |
 
 ### Progressive Disclosure
 
@@ -171,13 +167,13 @@ execute_code 도구로 아래의 Python 코드를 실행하세요.
 4. **작업 수행**: 로드된 지침에 따라 `execute_code`, `write_file` 등의 도구를 사용하여 작업을 수행합니다.
 5. **결과 전달**: 결과 파일이 있으면 `upload_file_to_s3`로 업로드하여 URL을 제공합니다.
 
-활성화할 스킬은 `config.json`의 `default_skills`(베이스)와 `plugin_skills`(플러그인별)에서 설정하며, Streamlit UI에서도 체크박스로 선택할 수 있습니다.
+활성화할 스킬은 `favorite_tools.json`의 기본값과 Web UI Task 설정에서 선택할 수 있습니다.
 
 
 
 ## LangGraph에서 Skill의 구현
 
-[chat.py](./application/chat.py)의 run_langgraph_agent는 사용자의 요청(query)를 Agent를 이용해 수행합니다. 여기서는 [app.py](./application/app.py)에서 선택한 MCP 서버의 리스트에서 mcp.json을 생성하여 server_params을 추출하고, MCP tool과 built-in tool을 추출하여 agent를 생성합니다. built-in tool에는 skill을 위한 get_skill_instructions과 execute_code, write_file, read_file 들이 있습니다. 
+[langgraph_agent.py](./application/langgraph_agent.py)의 `run_langgraph_agent`는 사용자의 요청(query)를 Agent를 이용해 수행합니다. Web UI Task에서 선택한 MCP 서버·Skill 목록으로 MCP client와 built-in tool을 구성합니다. built-in tool에는 skill을 위한 `get_skill_instructions`와 `execute_code`, `write_file`, `read_file` 등이 있습니다.
 
 ```python
 async def run_langgraph_agent(query, mcp_servers):
@@ -431,7 +427,10 @@ python uninstaller.py --delete-knowledge-base --delete-neptune
 
 | 경로 | 모듈 | 역할 |
 |------|------|------|
-| Streamlit RAG 모드 | `chat.run_rag_with_knowledge_base` | KB `retrieve` → LLM 답변 |
+| knowledge base MCP | `mcp_retrieve` / `mcp_server_retrieve` | GraphRAG retrieve |
+| RAG upload API | `api/routes_rag` | S3 업로드 + KB sync |
+| Agent chat | `langgraph_agent` + knowledge base MCP | 도구로 KB 검색 후 답변 |
+
 | Agent MCP | `mcp_server_retrieve.py` → `mcp_retrieve.py` | `knowledge base` MCP 도구로 동일 KB 검색 |
 
 `mcp_retrieve.retrieve()`는 `bedrock-agent-runtime`의 `Retrieve` API를 호출합니다. Knowledge Base가 Neptune Analytics에서 벡터 검색과 Entity 그래프 순회를 수행한 뒤 보강된 Chunk를 반환합니다. 참조 메타데이터의 `from` 필드는 `GraphRAG`입니다.
@@ -551,10 +550,25 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-이후 아래와 같은 명령어로 streamlit을 실행합니다. 
+이후 아래와 같이 Web UI를 빌드하고 FastAPI를 실행합니다.
 
 ```text
-streamlit run application/app.py
+# 프론트 빌드 후 uvicorn (포트 8501)
+./run_local.sh
+
+# 또는 수동
+cd application/web && npm install && npm run build && cd ../..
+uvicorn application.server:app --host 0.0.0.0 --port 8501
+```
+
+개발 시 Vite 핫리로드:
+
+```text
+# 터미널 1
+uvicorn application.server:app --host 0.0.0.0 --port 8501
+
+# 터미널 2
+cd application/web && npm run dev   # http://localhost:5173  (/api → :8501 프록시)
 ```
 
 ### MCP

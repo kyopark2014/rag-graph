@@ -4,6 +4,8 @@ import json
 import traceback
 import boto3
 import os
+from urllib import parse
+from botocore.exceptions import ClientError
 
 logging.basicConfig(
     level=logging.INFO,  # Default to INFO level
@@ -17,6 +19,328 @@ logger = logging.getLogger("utils")
 workingDir = os.path.dirname(os.path.abspath(__file__))
 config_path = os.path.join(workingDir, "config.json")
 favorite_tools_path = os.path.join(os.path.dirname(config_path), "favorite_tools.json")
+SKILLS_DIR = os.path.join(workingDir, "skills")
+
+SESSION_STORAGE_DIR = os.environ.get(
+    "SESSION_STORAGE_DIR",
+    os.path.join(workingDir, ".session_storage"),
+)
+SKILLS_DIR = os.path.join(workingDir, "skills")
+
+
+def sanitize_user_path_segment(user_id: str | None) -> str | None:
+    """Return a safe single path segment for per-user workspace folders, or None."""
+    if not user_id:
+        return None
+    raw = str(user_id).strip()
+    # Never treat opaque signed session cookies as folder names.
+    if raw.startswith("v1.") and raw.count(".") >= 2:
+        logger.warning("Refusing signed session token as artifacts path segment")
+        return None
+    if len(raw) > 128:
+        logger.warning("Refusing oversized user_id as artifacts path segment")
+        return None
+    # Collapse path separators so user_id cannot escape the intended prefix.
+    segment = (
+        raw
+        .replace("/", "_")
+        .replace("\\", "_")
+        .replace("..", "_")
+    )
+    return segment or None
+
+
+def get_user_artifacts_dir(user_id: str | None) -> str:
+    """Absolute path to {SESSION_STORAGE_DIR}/{user_id}/artifacts (does not create)."""
+    segment = sanitize_user_path_segment(user_id)
+    if not segment:
+        segment = "default"
+    return os.path.join(SESSION_STORAGE_DIR, segment, "artifacts")
+
+
+def ensure_user_artifacts_dir(user_id: str | None) -> str:
+    """Create {SESSION_STORAGE_DIR}/{user_id}/artifacts if needed and return it."""
+    segment = sanitize_user_path_segment(user_id)
+    if not segment:
+        raise ValueError(
+            "Invalid user_id for artifacts path; expected a plain user id, "
+            "not a signed session cookie"
+        )
+    artifacts_dir = os.path.join(SESSION_STORAGE_DIR, segment, "artifacts")
+    os.makedirs(artifacts_dir, exist_ok=True)
+    logger.info("user artifacts dir ready: %s", artifacts_dir)
+    return artifacts_dir
+
+
+def get_user_skills_dir(user_id: str | None) -> str:
+    """Absolute path to {SESSION_STORAGE_DIR}/{user_id}/skills (does not create)."""
+    segment = sanitize_user_path_segment(user_id) or "default"
+    return os.path.join(SESSION_STORAGE_DIR, segment, "skills")
+
+
+def ensure_user_skills_dir(user_id: str | None) -> str:
+    """Create {SESSION_STORAGE_DIR}/{user_id}/skills if needed and return it."""
+    segment = sanitize_user_path_segment(user_id)
+    if not segment:
+        raise ValueError(
+            "Invalid user_id for skills path; expected a plain user id, "
+            "not a signed session cookie"
+        )
+    skills_dir = os.path.join(SESSION_STORAGE_DIR, segment, "skills")
+    os.makedirs(skills_dir, exist_ok=True)
+    logger.info("user skills dir ready: %s", skills_dir)
+    return skills_dir
+
+
+def get_user_graph_dir(user_id: str | None) -> str:
+    """Absolute path to {SESSION_STORAGE_DIR}/{user_id}/graph (does not create)."""
+    segment = sanitize_user_path_segment(user_id)
+    if not segment:
+        segment = "default"
+    return os.path.join(SESSION_STORAGE_DIR, segment, "graph")
+
+
+def ensure_user_graph_dir(user_id: str | None) -> str:
+    """Create session graph workspace: corpus/ + out/ (shared extract+publish).
+
+    Returns the graph root: {SESSION_STORAGE_DIR}/{user_id}/graph
+    """
+    segment = sanitize_user_path_segment(user_id)
+    if not segment:
+        raise ValueError(
+            "Invalid user_id for graph path; expected a plain user id, "
+            "not a signed session cookie"
+        )
+    graph_dir = os.path.join(SESSION_STORAGE_DIR, segment, "graph")
+    for name in ("corpus", "out"):
+        os.makedirs(os.path.join(graph_dir, name), exist_ok=True)
+    logger.info("user graph dir ready: %s", graph_dir)
+    return graph_dir
+
+
+def user_graph_html_path(user_id: str | None) -> str:
+    """Published HTML: {SESSION_STORAGE_DIR}/{user_id}/graph/out/graph.html"""
+    segment = sanitize_user_path_segment(user_id) or "default"
+    return os.path.join(SESSION_STORAGE_DIR, segment, "graph", "out", "graph.html")
+
+
+GRAPH_PATTERNS = ("pattern1", "pattern2", "pattern3")
+DEFAULT_GRAPH_PATTERN = "pattern1"
+
+_DEFAULT_USER_SETTINGS: dict[str, object] = {
+    "knowledge_graph_enabled": False,
+    "graph_pattern": DEFAULT_GRAPH_PATTERN,
+}
+
+
+def normalize_graph_pattern(value: object | None) -> str:
+    raw = str(value or "").strip().lower().replace(" ", "").replace("_", "")
+    aliases = {
+        "pattern1": "pattern1",
+        "p1": "pattern1",
+        "1": "pattern1",
+        "forceatlas": "pattern1",
+        "pattern2": "pattern2",
+        "p2": "pattern2",
+        "2": "pattern2",
+        "neo4j": "pattern2",
+        "neo4jexplore": "pattern2",
+        "pattern3": "pattern3",
+        "p3": "pattern3",
+        "3": "pattern3",
+        "holistic": "pattern3",
+        "holisticview": "pattern3",
+    }
+    return aliases.get(raw, DEFAULT_GRAPH_PATTERN)
+
+
+def get_user_settings_path(user_id: str | None) -> str:
+    """Absolute path to {SESSION_STORAGE_DIR}/{user_id}/settings.json (does not create)."""
+    segment = sanitize_user_path_segment(user_id) or "default"
+    return os.path.join(SESSION_STORAGE_DIR, segment, "settings.json")
+
+
+def load_user_settings(user_id: str | None) -> dict[str, object]:
+    """Load per-user UI/feature settings. Missing file → defaults (KG on)."""
+    settings = dict(_DEFAULT_USER_SETTINGS)
+    path = get_user_settings_path(user_id)
+    if not os.path.isfile(path):
+        return settings
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        if isinstance(raw, dict):
+            if "knowledge_graph_enabled" in raw:
+                settings["knowledge_graph_enabled"] = bool(raw["knowledge_graph_enabled"])
+            if "graph_pattern" in raw:
+                settings["graph_pattern"] = normalize_graph_pattern(raw.get("graph_pattern"))
+    except (OSError, json.JSONDecodeError) as e:
+        logger.warning("Failed to load user settings %s: %s", path, e)
+    return settings
+
+
+def save_user_settings(user_id: str | None, **updates: object) -> dict[str, object]:
+    """Merge updates into per-user settings.json and return the full settings."""
+    segment = sanitize_user_path_segment(user_id)
+    if not segment:
+        raise ValueError(
+            "Invalid user_id for settings path; expected a plain user id, "
+            "not a signed session cookie"
+        )
+    user_dir = os.path.join(SESSION_STORAGE_DIR, segment)
+    os.makedirs(user_dir, exist_ok=True)
+    settings = load_user_settings(user_id)
+    for key, value in updates.items():
+        if key == "knowledge_graph_enabled":
+            settings[key] = bool(value)
+        elif key == "graph_pattern":
+            settings[key] = normalize_graph_pattern(value)
+    path = get_user_settings_path(user_id)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(settings, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    logger.info("user settings saved: %s -> %s", path, settings)
+    return settings
+
+
+def is_knowledge_graph_enabled(user_id: str | None) -> bool:
+    """True when Knowledge Graph feature is on (default)."""
+    return bool(load_user_settings(user_id).get("knowledge_graph_enabled", True))
+
+
+
+def is_hybrid_graph_search_enabled() -> bool:
+    """True when config.json hybrid_graph_search is enable (embedding vector search)."""
+    cfg = load_config() or {}
+    raw = str(cfg.get("hybrid_graph_search") or "").strip().lower()
+    return raw in {"enable", "enabled", "on", "true", "1", "yes"}
+
+
+def get_graph_pattern(user_id: str | None) -> str:
+    """Selected Knowledge Graph HTML pattern (pattern1|pattern2|pattern3)."""
+    return normalize_graph_pattern(
+        load_user_settings(user_id).get("graph_pattern", DEFAULT_GRAPH_PATTERN)
+    )
+
+
+def get_user_skills_list_path(user_id: str | None) -> str:
+    """Absolute path to {SESSION_STORAGE_DIR}/{user_id}/skills.list (does not create)."""
+    segment = sanitize_user_path_segment(user_id) or "default"
+    return os.path.join(SESSION_STORAGE_DIR, segment, "skills.list")
+
+
+def _list_skill_dir_names(skills_dir: str) -> list[str]:
+    """Return subdirectory names that contain SKILL.md."""
+    if not os.path.isdir(skills_dir):
+        return []
+    names: list[str] = []
+    try:
+        entries = sorted(os.listdir(skills_dir))
+    except OSError as e:
+        logger.warning("Failed to list skills directory %s: %s", skills_dir, e)
+        return []
+    for entry in entries:
+        if os.path.isfile(os.path.join(skills_dir, entry, "SKILL.md")):
+            names.append(entry)
+    return names
+
+
+def _load_skills_list_file(path: str) -> list[str]:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return [
+                line.strip()
+                for line in f
+                if line.strip() and not line.strip().startswith("#")
+            ]
+    except FileNotFoundError:
+        return []
+    except OSError as e:
+        logger.warning("Failed to read skills.list %s: %s", path, e)
+        return []
+
+
+def _seed_skill_names(user_id: str | None) -> list[str]:
+    """Builtin application/skills.list + skill-creator dirs under the user skills path."""
+    default_path = os.path.join(workingDir, "skills.list")
+    builtin = _load_skills_list_file(default_path)
+    user_skills = _list_skill_dir_names(get_user_skills_dir(user_id))
+    merged: list[str] = []
+    seen: set[str] = set()
+    for name in builtin + user_skills:
+        if name not in seen:
+            merged.append(name)
+            seen.add(name)
+    return merged
+
+
+def write_user_skills_list(user_id: str | None, names: list[str] | None = None) -> str:
+    """Write {SESSION_STORAGE_DIR}/{user_id}/skills.list and return its path."""
+    ensure_user_skills_dir(user_id)
+    path = get_user_skills_list_path(user_id)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    merged = names if names is not None else _seed_skill_names(user_id)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(merged) + ("\n" if merged else ""))
+    logger.info(
+        "wrote user skills.list (%d skills) -> %s",
+        len(merged),
+        path,
+    )
+    return path
+
+
+def update_user_skills_list(user_id: str | None) -> str:
+    """Rewrite per-user skills.list from application/skills.list + user skills dir."""
+    return write_user_skills_list(user_id)
+
+
+def _builtin_skill_exists(name: str) -> bool:
+    return os.path.isfile(os.path.join(workingDir, "skills", name, "SKILL.md"))
+
+
+def _user_skill_exists(user_id: str | None, name: str) -> bool:
+    return os.path.isfile(
+        os.path.join(get_user_skills_dir(user_id), name, "SKILL.md")
+    )
+
+
+def ensure_user_skills_list(user_id: str | None) -> str:
+    """Use {SESSION_STORAGE_DIR}/{user_id}/skills.list; create it if missing.
+
+    When the file already exists, keep user ordering/custom entries, but:
+    - append new builtin names from application/skills.list
+    - append newly discovered skill-creator dirs under ``{user_id}/skills/``
+    - drop entries whose SKILL.md no longer exists in builtin or user skills
+    """
+    ensure_user_skills_dir(user_id)
+    path = get_user_skills_list_path(user_id)
+    if not os.path.isfile(path):
+        return write_user_skills_list(user_id)
+
+    existing = _load_skills_list_file(path)
+    kept = [
+        name
+        for name in existing
+        if _builtin_skill_exists(name) or _user_skill_exists(user_id, name)
+    ]
+    seen = set(kept)
+    default_path = os.path.join(workingDir, "skills.list")
+    candidates = _load_skills_list_file(default_path) + _list_skill_dir_names(
+        get_user_skills_dir(user_id)
+    )
+    appended = [name for name in candidates if name not in seen]
+    updated = kept + appended
+    if updated != existing:
+        return write_user_skills_list(user_id, updated)
+    logger.info(
+        "using existing user skills.list (%d skills) -> %s",
+        len(existing),
+        path,
+    )
+    return path
+
+
     
 def load_config():
     config = None
@@ -109,6 +433,29 @@ bedrock_region = config.get('region', 'us-west-2')
 logger.info(f"bedrock_region: {bedrock_region}")
 projectName = config.get('projectName', 'mop')
 logger.info(f"projectName: {projectName}")
+
+
+def persist_config_updates(updates):
+    """Merge values into config and write config.json."""
+    global config
+    if not updates:
+        return
+    changed = False
+    for key, value in updates.items():
+        if value is None:
+            continue
+        s = value.strip() if isinstance(value, str) else str(value)
+        if not s:
+            continue
+        if config.get(key) != s:
+            config[key] = s
+            changed = True
+    if changed:
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2)
+            f.write("\n")
+        logger.info("config.json updated: %s", list(updates.keys()))
+
 
 
 def get_contents_type(file_name):
@@ -296,45 +643,184 @@ def update_rag_info():
 if not knowledge_base_id or not data_source_id:
     knowledge_base_id, data_source_id = update_rag_info()
 
-def sync_data_source():
+ACTIVE_INGESTION_STATUSES = ("STARTING", "IN_PROGRESS")
+
+
+def refresh_rag_ids() -> bool:
+    """Refresh in-memory KB/data-source IDs from AWS and persist to config.json."""
     global knowledge_base_id, data_source_id
-
-    def _start_ingestion():
-        bedrock_client = boto3.client(
-            service_name='bedrock-agent',
-            region_name=region
+    kb_id, ds_id = update_rag_info()
+    if kb_id and ds_id:
+        knowledge_base_id = kb_id
+        data_source_id = ds_id
+        logger.info(
+            "Refreshed RAG ids: knowledge_base_id=%s data_source_id=%s",
+            knowledge_base_id,
+            data_source_id,
         )
-        return bedrock_client.start_ingestion_job(
-            knowledgeBaseId=knowledge_base_id,
-            dataSourceId=data_source_id
-        )
+        return True
+    logger.error(
+        "Failed to refresh RAG ids (knowledge_base_id=%s data_source_id=%s)",
+        kb_id,
+        ds_id,
+    )
+    return False
 
-    if not (knowledge_base_id and data_source_id):
-        knowledge_base_id, data_source_id = update_rag_info()
 
-    if not (knowledge_base_id and data_source_id):
-        logger.warning("Cannot sync: knowledge_base_id or data_source_id missing")
-        return
+def _is_resource_not_found(exc: Exception) -> bool:
+    if isinstance(exc, ClientError):
+        return exc.response.get("Error", {}).get("Code") == "ResourceNotFoundException"
+    return "ResourceNotFoundException" in type(exc).__name__
+
+
+def get_active_ingestion_job(*, _retried: bool = False) -> dict | None:
+    """Return an in-flight ingestion job if Knowledge Base sync is already running."""
+    if not knowledge_base_id or not data_source_id:
+        logger.error("knowledge_base_id or data_source_id is not configured")
+        if not _retried and refresh_rag_ids():
+            return get_active_ingestion_job(_retried=True)
+        return None
 
     try:
-        response = _start_ingestion()
-        logger.info(f"(start_ingestion_job) response: {response}")
-    except Exception as e:
-        error_name = type(e).__name__
-        if "ResourceNotFound" in error_name or "ResourceNotFound" in str(e):
-            logger.info(
-                f"Stale RAG ids (kb={knowledge_base_id}, ds={data_source_id}); "
-                "refreshing and retrying..."
+        bedrock_client = boto3.client(
+            service_name="bedrock-agent",
+            region_name=region,
+        )
+        for status in ACTIVE_INGESTION_STATUSES:
+            response = bedrock_client.list_ingestion_jobs(
+                knowledgeBaseId=knowledge_base_id,
+                dataSourceId=data_source_id,
+                filters=[
+                    {
+                        "attribute": "STATUS",
+                        "operator": "EQ",
+                        "values": [status],
+                    }
+                ],
+                maxResults=1,
+                sortBy={
+                    "attribute": "STARTED_AT",
+                    "order": "DESCENDING",
+                },
             )
-            knowledge_base_id, data_source_id = update_rag_info()
-            if knowledge_base_id and data_source_id:
-                try:
-                    response = _start_ingestion()
-                    logger.info(f"(start_ingestion_job retry) response: {response}")
-                    return
-                except Exception:
-                    err_msg = traceback.format_exc()
-                    logger.info(f"error message: {err_msg}")
-                    return
-        err_msg = traceback.format_exc()
-        logger.info(f"error message: {err_msg}")
+            summaries = response.get("ingestionJobSummaries") or []
+            if not summaries:
+                continue
+            job = summaries[0]
+            logger.info("Active ingestion job found: %s", job)
+            return {
+                "ingestion_job_id": job.get("ingestionJobId"),
+                "status": job.get("status"),
+                "started_at": str(job["startedAt"]) if job.get("startedAt") else None,
+            }
+        return None
+    except Exception as e:
+        if not _retried and _is_resource_not_found(e):
+            logger.warning(
+                "Stale knowledge_base_id/data_source_id (%s / %s); refreshing",
+                knowledge_base_id,
+                data_source_id,
+            )
+            if refresh_rag_ids():
+                return get_active_ingestion_job(_retried=True)
+        logger.error("Error listing ingestion jobs: %s", traceback.format_exc())
+        raise
+
+
+def sync_data_source(*, _retried: bool = False):
+    """Start a Knowledge Base ingestion job for the configured data source."""
+    if not knowledge_base_id or not data_source_id:
+        logger.error("knowledge_base_id or data_source_id is not configured")
+        if not _retried and refresh_rag_ids():
+            return sync_data_source(_retried=True)
+        return None
+
+    try:
+        bedrock_client = boto3.client(
+            service_name="bedrock-agent",
+            region_name=region,
+        )
+        response = bedrock_client.start_ingestion_job(
+            knowledgeBaseId=knowledge_base_id,
+            dataSourceId=data_source_id,
+        )
+        logger.info("(start_ingestion_job) response: %s", response)
+        job = response.get("ingestionJob", {})
+        return {
+            "ingestion_job_id": job.get("ingestionJobId"),
+            "status": job.get("status"),
+        }
+    except Exception as e:
+        if not _retried and _is_resource_not_found(e):
+            logger.warning(
+                "Stale knowledge_base_id/data_source_id (%s / %s); refreshing",
+                knowledge_base_id,
+                data_source_id,
+            )
+            if refresh_rag_ids():
+                return sync_data_source(_retried=True)
+        logger.error("Error syncing data source: %s", traceback.format_exc())
+        return None
+
+
+def _sanitize_s3_user_segment(user_id: str | None) -> str | None:
+    """Return a safe single path segment for per-user S3 folders, or None."""
+    return sanitize_user_path_segment(user_id)
+
+
+def upload_to_s3(
+    file_bytes: bytes,
+    file_name: str,
+    user_id: str | None = None,
+) -> dict | None:
+    """Upload a file to S3 under docs/ (or images/) and return upload metadata.
+
+    When ``user_id`` is provided, the object key becomes
+    ``{prefix}/{user_id}/{file_name}`` so each user has a separate folder.
+    """
+    if not s3_bucket:
+        logger.error("s3_bucket is not configured")
+        return None
+
+    try:
+        s3_client = boto3.client(service_name="s3", region_name=bedrock_region)
+        content_type = get_contents_type(file_name)
+        logger.info("content_type: %s", content_type)
+
+        prefix = "images" if content_type.startswith("image/") else "docs"
+        user_segment = _sanitize_s3_user_segment(user_id)
+        if user_segment:
+            s3_key = f"{prefix}/{user_segment}/{file_name}"
+            relative_url_path = f"{prefix}/{parse.quote(user_segment)}/{parse.quote(file_name)}"
+        else:
+            s3_key = f"{prefix}/{file_name}"
+            relative_url_path = f"{prefix}/{parse.quote(file_name)}"
+        user_meta = {"content_type": content_type}
+
+        put_params = {
+            "Bucket": s3_bucket,
+            "Key": s3_key,
+            "Metadata": user_meta,
+            "Body": file_bytes,
+        }
+        if content_type != "no info":
+            put_params["ContentType"] = content_type
+        if content_type == "application/pdf":
+            put_params["ContentDisposition"] = "inline"
+
+        response = s3_client.put_object(**put_params)
+        logger.info("upload response: %s", response)
+
+        url = None
+        if sharing_url:
+            url = f"{sharing_url.rstrip('/')}/{relative_url_path}"
+
+        return {
+            "file_name": file_name,
+            "s3_key": s3_key,
+            "content_type": content_type,
+            "url": url,
+        }
+    except Exception:
+        logger.error("Error uploading to S3: %s", traceback.format_exc())
+        return None
