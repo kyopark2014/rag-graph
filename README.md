@@ -2,7 +2,7 @@
 
 여기에서는 Amazon Bedrock Knowledge Bases를 이용해 GraphRAG로 구현합니다. 사용자는 **FastAPI + React** 로 구현된 Web UI로 접속하여 문서를 업로드 하고 검색할 수 있습니다. LangGraph Agent를 이용해 MCP와 Skill을 활용할 수 있습니다. 인터넷 검색은 AgentCore Gateway를 이용한 websearch를 이용해 구현됩니다.
 
-<img width="800" alt="image" src="https://github.com/user-attachments/assets/ce6878ed-62b8-420d-a04c-928c45583e57" />
+<img width="800" alt="image" src="https://github.com/user-attachments/assets/b79c5d10-d279-4b2b-abf7-da37e3967146" />
 
 
 ## Agent Skills
