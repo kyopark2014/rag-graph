@@ -33,7 +33,7 @@ knowledge_base_name = config.get('knowledge_base_name') or projectName
 knowledge_base_id = config.get('knowledge_base_id')
 number_of_results = 5
 
-doc_prefix = "docs/"
+doc_prefix = f"docs/{projectName}/" if projectName else "docs/"
 path = config.get('sharing_url', '')
 
 aws_access_key = config.get('aws', {}).get('access_key_id')

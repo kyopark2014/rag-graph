@@ -17,7 +17,7 @@ class TaskCreate(BaseModel):
     mcp_servers: list[str] | None = None
     guardrail_enabled: bool = False
     llm_gateway_enabled: bool = False
-    memory_enabled: bool = True
+    memory_enabled: bool = False
     title: str = "New task"
 
 

@@ -546,18 +546,29 @@ s3_bucket = config.get('s3_bucket', f'storage-for-rag-project-{accountId}-{regio
 sharing_url = config.get('sharing_url', '')
 
 def update_sharing_url():
-    """Look up CloudFront distribution domain for this project and save as sharing_url."""
+    """Look up shared CloudFront (rag-project) distribution domain and save as sharing_url."""
     try:
         cf_client = boto3.client('cloudfront', region_name=region)
         paginator = cf_client.get_paginator('list_distributions')
-        target_origin_id = f"s3-{projectName}"
+        # Shared with agent-skills / other rag-project apps
+        target_origin_ids = {f"s3-rag-project", f"s3-{projectName}"}
+        target_comment = "CloudFront-for-rag-project"
 
         for page in paginator.paginate():
             dist_list = page.get('DistributionList', {})
             for dist in dist_list.get('Items', []):
+                comment = dist.get('Comment', '')
+                if target_comment in comment:
+                    domain = dist['DomainName']
+                    url = f"https://{domain}"
+                    logger.info(f"sharing_url found (shared CloudFront): {url}")
+                    config['sharing_url'] = url
+                    with open(config_path, "w", encoding="utf-8") as f:
+                        json.dump(config, f, indent=2)
+                    return url
                 origins = dist.get('Origins', {}).get('Items', [])
                 for origin in origins:
-                    if origin['Id'] == target_origin_id:
+                    if origin['Id'] in target_origin_ids:
                         domain = dist['DomainName']
                         url = f"https://{domain}"
                         logger.info(f"sharing_url found: {url}")
@@ -565,7 +576,10 @@ def update_sharing_url():
                         with open(config_path, "w", encoding="utf-8") as f:
                             json.dump(config, f, indent=2)
                         return url
-        logger.warning(f"CloudFront distribution with origin '{target_origin_id}' not found")
+        logger.warning(
+            f"CloudFront distribution not found (comment '{target_comment}' "
+            f"or origin in {sorted(target_origin_ids)})"
+        )
     except Exception:
         err_msg = traceback.format_exc()
         logger.info(f"Failed to look up sharing_url: {err_msg}")
@@ -768,15 +782,23 @@ def _sanitize_s3_user_segment(user_id: str | None) -> str | None:
     return sanitize_user_path_segment(user_id)
 
 
+def docs_s3_prefix(project: str | None = None) -> str:
+    """S3 prefix for RAG documents: docs/{projectName} (no trailing slash)."""
+    name = (project or projectName or "").strip().strip("/")
+    if not name:
+        name = "default"
+    return f"docs/{name}"
+
+
 def upload_to_s3(
     file_bytes: bytes,
     file_name: str,
     user_id: str | None = None,
 ) -> dict | None:
-    """Upload a file to S3 under docs/ (or images/) and return upload metadata.
+    """Upload a file to S3 under docs/{projectName}/ (or images/) and return metadata.
 
     When ``user_id`` is provided, the object key becomes
-    ``{prefix}/{user_id}/{file_name}`` so each user has a separate folder.
+    ``docs/{projectName}/{user_id}/{file_name}`` (or ``images/{user_id}/...``).
     """
     if not s3_bucket:
         logger.error("s3_bucket is not configured")
@@ -787,7 +809,11 @@ def upload_to_s3(
         content_type = get_contents_type(file_name)
         logger.info("content_type: %s", content_type)
 
-        prefix = "images" if content_type.startswith("image/") else "docs"
+        prefix = (
+            "images"
+            if content_type.startswith("image/")
+            else docs_s3_prefix()
+        )
         user_segment = _sanitize_s3_user_segment(user_id)
         if user_segment:
             s3_key = f"{prefix}/{user_segment}/{file_name}"

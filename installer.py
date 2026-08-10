@@ -23,8 +23,10 @@ vector_index_name = project_name
 neptune_graph_name = project_name
 neptune_provisioned_memory = 32  # m-NCU (POC). Min 16; 32 recommended for GraphRAG POC
 embedding_dimensions = 1024
-cloudfront_comment = f"CloudFront-for-{project_name}"
-oai_comment = f"OAI for {project_name}"
+# Shared with agent-skills / other rag-project apps
+SHARED_RAG_PROJECT = "rag-project"
+cloudfront_comment = f"CloudFront-for-{SHARED_RAG_PROJECT}"
+oai_comment = f"OAI for {SHARED_RAG_PROJECT}"
 
 sts_client = boto3.client("sts", region_name=region)
 account_id = sts_client.get_caller_identity()["Account"]
@@ -41,7 +43,7 @@ agentcore_control_client = boto3.client(
     region_name=AGENTCORE_GATEWAY_REGION,
 )
 
-bucket_name = f"storage-for-{project_name}-{account_id}-{region}"
+bucket_name = f"storage-for-{SHARED_RAG_PROJECT}-{account_id}-{region}"
 
 def setup_logging(log_level=logging.INFO):
     """Setup logging configuration."""
@@ -65,8 +67,8 @@ logger = setup_logging()
 
 
 def create_s3_bucket() -> str:
-    """Create S3 bucket with CORS configuration."""
-    logger.info(f"[1/5] Creating S3 bucket: {bucket_name}")
+    """Create or reuse shared S3 bucket (storage-for-rag-project-...)."""
+    logger.info(f"[1/5] Creating/reusing shared S3 bucket: {bucket_name}")
     
     try:
         # Create bucket
@@ -115,9 +117,9 @@ def create_s3_bucket() -> str:
             VersioningConfiguration={"Status": "Suspended"}
         )
         
-        # Create docs and artifacts folders
-        logger.debug("Creating docs and artifacts folders")
-        for folder in ["docs/", "artifacts/"]:
+        # Create docs/{projectName} and artifacts folders
+        logger.debug("Creating docs/%s and artifacts folders", project_name)
+        for folder in [f"docs/{project_name}/", "artifacts/"]:
             try:
                 s3_client.put_object(
                     Bucket=bucket_name,
@@ -134,9 +136,9 @@ def create_s3_bucket() -> str:
     except ClientError as e:
         if e.response["Error"]["Code"] in ["BucketAlreadyExists", "BucketAlreadyOwnedByYou"]:
             logger.warning(f"S3 bucket already exists: {bucket_name}")
-            # Create docs and artifacts folders if bucket already exists
-            logger.debug("Creating docs and artifacts folders in existing bucket")
-            for folder in ["docs/", "artifacts/"]:
+            # Create docs/{projectName} and artifacts folders if bucket already exists
+            logger.debug("Creating docs/%s and artifacts folders in existing bucket", project_name)
+            for folder in [f"docs/{project_name}/", "artifacts/"]:
                 try:
                     s3_client.put_object(
                         Bucket=bucket_name,
@@ -608,6 +610,211 @@ def _verify_knowledge_base_role() -> None:
     logger.info("  ✓ Knowledge Base role trust policy is correct")
 
 
+# GraphRAG ingestion models (inference profiles in account region)
+PARSER_MODEL_ID = "us.anthropic.claude-sonnet-4-6"
+GRAPH_CONSTRUCTION_MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+
+
+def _inference_profile_arn(model_id: str) -> str:
+    return f"arn:aws:bedrock:{region}:{account_id}:inference-profile/{model_id}"
+
+
+def _graphrag_vector_ingestion_configuration(
+    *,
+    parser_model_arn: Optional[str] = None,
+    graph_construction_model_arn: Optional[str] = None,
+) -> Dict:
+    """Neptune Analytics GraphRAG ingestion: FM parser + entity extraction."""
+    parser_arn = parser_model_arn or _inference_profile_arn(PARSER_MODEL_ID)
+    graph_arn = graph_construction_model_arn or _inference_profile_arn(
+        GRAPH_CONSTRUCTION_MODEL_ID
+    )
+    return {
+        "chunkingConfiguration": {
+            "chunkingStrategy": "FIXED_SIZE",
+            "fixedSizeChunkingConfiguration": {
+                "maxTokens": 300,
+                "overlapPercentage": 20,
+            },
+        },
+        # Foundation model as parser (Claude Sonnet 4.6)
+        "parsingConfiguration": {
+            "parsingStrategy": "BEDROCK_FOUNDATION_MODEL",
+            "bedrockFoundationModelConfiguration": {
+                "modelArn": parser_arn,
+            },
+        },
+        # Model for graph construction (Claude Haiku 4.5)
+        "contextEnrichmentConfiguration": {
+            "type": "BEDROCK_FOUNDATION_MODEL",
+            "bedrockFoundationModelConfiguration": {
+                "modelArn": graph_arn,
+                "enrichmentStrategyConfiguration": {
+                    "method": "CHUNK_ENTITY_EXTRACTION",
+                },
+            },
+        },
+    }
+
+
+def _data_source_has_expected_ingestion(details: Dict) -> bool:
+    """True when DS already uses Sonnet 4.6 parser + Haiku 4.5 graph construction."""
+    vic = details.get("dataSource", {}).get("vectorIngestionConfiguration") or {}
+    parsing = vic.get("parsingConfiguration") or {}
+    if parsing.get("parsingStrategy") != "BEDROCK_FOUNDATION_MODEL":
+        return False
+    parser_arn = (
+        (parsing.get("bedrockFoundationModelConfiguration") or {}).get("modelArn") or ""
+    )
+    if PARSER_MODEL_ID not in parser_arn:
+        return False
+    enrichment = vic.get("contextEnrichmentConfiguration") or {}
+    graph_arn = (
+        (enrichment.get("bedrockFoundationModelConfiguration") or {}).get("modelArn")
+        or ""
+    )
+    return GRAPH_CONSTRUCTION_MODEL_ID in graph_arn
+
+
+def _ensure_graphrag_data_source(
+    bedrock_agent_client,
+    knowledge_base_id: str,
+    s3_bucket_name: str,
+) -> Optional[str]:
+    """Ensure KB data source points at the shared S3 bucket and docs/{project}/ prefix.
+
+    Returns the usable data source id, or None if none could be ensured.
+    Parsing strategy cannot be changed after DS creation, so a mismatched
+    parser/graph model causes a new data source to be created and the old one deleted.
+    """
+    expected_bucket_arn = f"arn:aws:s3:::{s3_bucket_name}"
+    expected_prefix = f"docs/{project_name}/"
+    vector_ingestion = _graphrag_vector_ingestion_configuration()
+
+    try:
+        data_sources = bedrock_agent_client.list_data_sources(
+            knowledgeBaseId=knowledge_base_id,
+            maxResults=100,
+        )
+    except Exception as e:
+        logger.warning(f"  Could not list data sources for KB {knowledge_base_id}: {e}")
+        return None
+
+    matched_id: Optional[str] = None
+    stale_ids: List[str] = []
+
+    for ds in data_sources.get("dataSourceSummaries", []):
+        ds_id = ds["dataSourceId"]
+        try:
+            details = bedrock_agent_client.get_data_source(
+                knowledgeBaseId=knowledge_base_id,
+                dataSourceId=ds_id,
+            )
+            ds_cfg = details["dataSource"].get("dataSourceConfiguration", {})
+            s3_cfg = ds_cfg.get("s3Configuration") or {}
+            bucket_arn = s3_cfg.get("bucketArn", "")
+            prefixes = s3_cfg.get("inclusionPrefixes") or []
+            bucket_ok = (
+                bucket_arn == expected_bucket_arn and expected_prefix in prefixes
+            )
+            ingestion_ok = _data_source_has_expected_ingestion(details)
+
+            if bucket_ok and ingestion_ok:
+                logger.info(
+                    f"  ✓ Data source ready "
+                    f"(parser={PARSER_MODEL_ID}, graph={GRAPH_CONSTRUCTION_MODEL_ID}): "
+                    f"{ds_id}"
+                )
+                matched_id = ds_id
+                continue
+
+            if not bucket_ok:
+                logger.warning(
+                    f"  Updating data source {ds_id} to shared S3 "
+                    f"({s3_bucket_name}/{expected_prefix})"
+                )
+                try:
+                    bedrock_agent_client.update_data_source(
+                        knowledgeBaseId=knowledge_base_id,
+                        dataSourceId=ds_id,
+                        name=s3_bucket_name,
+                        description=f"S3 data source for GraphRAG: {s3_bucket_name}",
+                        dataSourceConfiguration={
+                            "type": "S3",
+                            "s3Configuration": {
+                                "bucketArn": expected_bucket_arn,
+                                "inclusionPrefixes": [expected_prefix],
+                            },
+                        },
+                        vectorIngestionConfiguration=vector_ingestion,
+                    )
+                    # Re-check: parsing strategy may be immutable → still stale
+                    refreshed = bedrock_agent_client.get_data_source(
+                        knowledgeBaseId=knowledge_base_id,
+                        dataSourceId=ds_id,
+                    )
+                    if _data_source_has_expected_ingestion(refreshed) and (
+                        (refreshed["dataSource"]
+                         .get("dataSourceConfiguration", {})
+                         .get("s3Configuration", {})
+                         .get("bucketArn")
+                         == expected_bucket_arn)
+                    ):
+                        logger.info(f"  ✓ Data source updated: {ds_id}")
+                        matched_id = ds_id
+                        continue
+                except Exception as update_err:
+                    logger.warning(
+                        f"  Could not update data source {ds_id}: {update_err}"
+                    )
+
+            if bucket_ok and not ingestion_ok:
+                logger.warning(
+                    f"  Data source {ds_id} has wrong parser/graph model "
+                    f"(parsing strategy is immutable); will recreate"
+                )
+            stale_ids.append(ds_id)
+        except Exception as e:
+            logger.warning(f"  Could not inspect/update data source {ds_id}: {e}")
+            stale_ids.append(ds_id)
+
+    if not matched_id:
+        logger.info(
+            "  Creating GraphRAG data source "
+            f"(parser={PARSER_MODEL_ID}, graph={GRAPH_CONSTRUCTION_MODEL_ID})..."
+        )
+        data_source_response = bedrock_agent_client.create_data_source(
+            knowledgeBaseId=knowledge_base_id,
+            name=s3_bucket_name,
+            description=f"S3 data source for GraphRAG: {s3_bucket_name}",
+            dataDeletionPolicy="RETAIN",
+            dataSourceConfiguration={
+                "type": "S3",
+                "s3Configuration": {
+                    "bucketArn": expected_bucket_arn,
+                    "inclusionPrefixes": [expected_prefix],
+                },
+            },
+            vectorIngestionConfiguration=vector_ingestion,
+        )
+        matched_id = data_source_response["dataSource"]["dataSourceId"]
+        logger.info(f"  ✓ Data source created: {matched_id}")
+
+    for stale_id in stale_ids:
+        if stale_id == matched_id:
+            continue
+        try:
+            bedrock_agent_client.delete_data_source(
+                knowledgeBaseId=knowledge_base_id,
+                dataSourceId=stale_id,
+            )
+            logger.info(f"  ✓ Deleted stale data source: {stale_id}")
+        except Exception as e:
+            logger.warning(f"  Could not delete stale data source {stale_id}: {e}")
+
+    return matched_id
+
+
 def create_knowledge_base_with_neptune(
     neptune_info: Dict[str, str],
     knowledge_base_role_arn: str,
@@ -617,10 +824,6 @@ def create_knowledge_base_with_neptune(
     logger.info("[4/5] Creating Knowledge Base with Neptune Analytics (GraphRAG)")
 
     bedrock_agent_client = boto3.client("bedrock-agent", region_name=region)
-    graph_construction_model_arn = (
-        f"arn:aws:bedrock:{region}:{account_id}:"
-        "inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0"
-    )
 
     # Reuse existing KB if it already points at this Neptune graph
     try:
@@ -640,6 +843,11 @@ def create_knowledge_base_with_neptune(
 
             if storage_type == "NEPTUNE_ANALYTICS" and current_graph_arn == neptune_info["arn"]:
                 logger.info("Knowledge Base is using the correct Neptune Analytics graph")
+                data_source_id = _ensure_graphrag_data_source(
+                    bedrock_agent_client, kb["knowledgeBaseId"], s3_bucket_name
+                )
+                if data_source_id:
+                    write_application_config({"data_source_id": data_source_id})
                 return kb["knowledgeBaseId"]
 
             logger.warning("Knowledge Base is not using the expected Neptune graph:")
@@ -709,7 +917,10 @@ def create_knowledge_base_with_neptune(
         logger.debug(f"  Knowledge Base status: {status} (waiting...)")
         time.sleep(10)
 
-    logger.info("  Creating GraphRAG data source (entity extraction enabled)...")
+    logger.info(
+        "  Creating GraphRAG data source "
+        f"(parser={PARSER_MODEL_ID}, graph={GRAPH_CONSTRUCTION_MODEL_ID})..."
+    )
     data_source_response = bedrock_agent_client.create_data_source(
         knowledgeBaseId=knowledge_base_id,
         name=s3_bucket_name,
@@ -719,33 +930,18 @@ def create_knowledge_base_with_neptune(
             "type": "S3",
             "s3Configuration": {
                 "bucketArn": f"arn:aws:s3:::{s3_bucket_name}",
-                "inclusionPrefixes": ["docs/"],
+                "inclusionPrefixes": [f"docs/{project_name}/"],
             },
         },
-        vectorIngestionConfiguration={
-            "chunkingConfiguration": {
-                "chunkingStrategy": "FIXED_SIZE",
-                "fixedSizeChunkingConfiguration": {
-                    "maxTokens": 300,
-                    "overlapPercentage": 20,
-                },
-            },
-            "contextEnrichmentConfiguration": {
-                "type": "BEDROCK_FOUNDATION_MODEL",
-                "bedrockFoundationModelConfiguration": {
-                    "modelArn": graph_construction_model_arn,
-                    "enrichmentStrategyConfiguration": {
-                        "method": "CHUNK_ENTITY_EXTRACTION",
-                    },
-                },
-            },
-        },
+        vectorIngestionConfiguration=_graphrag_vector_ingestion_configuration(),
     )
 
     data_source_id = data_source_response["dataSource"]["dataSourceId"]
     logger.info(f"  ✓ Data source created: {data_source_id}")
+    write_application_config({"data_source_id": data_source_id})
     logger.info(
-        "  Note: Run Bedrock Knowledge Base Sync after uploading docs/ to build the graph."
+        "  Note: Run Bedrock Knowledge Base Sync after uploading docs/%s/ to build the graph.",
+        project_name,
     )
 
     return knowledge_base_id
@@ -912,8 +1108,8 @@ def _ensure_websearch_gateway_target(gateway_id: str) -> str:
 
 
 def get_or_create_agentcore_websearch_gateway(gateway_service_role_arn: str) -> Dict[str, str]:
-    """Create gateway-websearch with the managed web-search connector in us-east-1."""
-    logger.info("[2/5] Creating AgentCore Web Search gateway")
+    """Create or reuse shared gateway-websearch with the managed web-search connector."""
+    logger.info("[2/5] Creating/reusing shared AgentCore Web Search gateway")
 
     gateway_id = None
     for gateway in _list_all_agentcore_gateways():
@@ -978,8 +1174,8 @@ def _apply_websearch_gateway_config(
 
 
 def create_cloudfront_distribution(s3_bucket_name: str) -> Dict[str, str]:
-    """Create CloudFront distribution with S3 origin (shared RAG project)."""
-    logger.info("[5/5] Creating CloudFront distribution")
+    """Create or reuse shared CloudFront distribution (CloudFront-for-rag-project)."""
+    logger.info("[5/5] Creating/reusing shared CloudFront distribution")
 
     try:
         distributions = cloudfront_client.list_distributions()
@@ -1012,7 +1208,7 @@ def create_cloudfront_distribution(s3_bucket_name: str) -> Dict[str, str]:
         if not oai_id:
             oai_response = cloudfront_client.create_cloud_front_origin_access_identity(
                 CloudFrontOriginAccessIdentityConfig={
-                    "CallerReference": f"{vector_index_name}-s3-oai-{int(time.time())}",
+                    "CallerReference": f"{SHARED_RAG_PROJECT}-s3-oai-{int(time.time())}",
                     "Comment": oai_comment,
                 }
             )
@@ -1044,7 +1240,7 @@ def create_cloudfront_distribution(s3_bucket_name: str) -> Dict[str, str]:
         logger.error(f"Failed to update S3 bucket policy: {e}")
         raise
 
-    origin_id = f"s3-{project_name}"
+    origin_id = f"s3-{SHARED_RAG_PROJECT}"
     distribution_config = {
         "CallerReference": f"{project_name}-{int(time.time())}",
         "Comment": cloudfront_comment,
@@ -1226,8 +1422,12 @@ def main():
         logger.info(f"  Knowledge Base ID: {knowledge_base_id}")
         logger.info(f"  Knowledge Base Role: {knowledge_base_role_arn}")
         logger.info(f"Total deployment time: {elapsed_time / 60:.2f} minutes")
-        logger.info("Upload documents to s3://{}/docs/ then Sync the Knowledge Base.".format(s3_bucket_name))
-        logger.info("Run locally: streamlit run application/app.py")
+        logger.info(
+            "Upload documents to s3://{}/docs/{}/ then Sync the Knowledge Base.".format(
+                s3_bucket_name, project_name
+            )
+        )
+        logger.info("Run locally: ./run_local.sh")
         logger.info("=" * 60)
     except Exception as e:
         elapsed_time = time.time() - start_time

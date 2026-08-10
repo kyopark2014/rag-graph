@@ -49,7 +49,7 @@ def init_db() -> None:
                   mcp_servers_json TEXT,
                   guardrail_enabled INTEGER DEFAULT 0,
                   llm_gateway_enabled INTEGER DEFAULT 0,
-                  memory_enabled INTEGER DEFAULT 1,
+                  memory_enabled INTEGER DEFAULT 0,
                   created_at TEXT,
                   updated_at TEXT
                 );
@@ -76,7 +76,7 @@ def init_db() -> None:
             except sqlite3.OperationalError:
                 pass
             try:
-                conn.execute("ALTER TABLE tasks ADD COLUMN memory_enabled INTEGER DEFAULT 1")
+                conn.execute("ALTER TABLE tasks ADD COLUMN memory_enabled INTEGER DEFAULT 0")
             except sqlite3.OperationalError:
                 pass
             try:
@@ -107,7 +107,7 @@ def _row_to_task(row: sqlite3.Row) -> dict[str, Any]:
             if "llm_gateway_enabled" in row.keys()
             else False
         ),
-        "memory_enabled": bool(row["memory_enabled"]) if "memory_enabled" in row.keys() else True,
+        "memory_enabled": bool(row["memory_enabled"]) if "memory_enabled" in row.keys() else False,
         "pinned": bool(row["pinned"]) if "pinned" in row.keys() else False,
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
@@ -178,7 +178,7 @@ def create_task(
     mcp_servers: list[str] | None = None,
     guardrail_enabled: bool = False,
     llm_gateway_enabled: bool = False,
-    memory_enabled: bool = True,
+    memory_enabled: bool = False,
     title: str = "New task",
 ) -> dict[str, Any]:
     task_id = str(uuid.uuid4())

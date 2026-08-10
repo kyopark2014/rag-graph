@@ -76,11 +76,11 @@ bedrock_region = config.get("region", "ap-northeast-2")
 accountId = config.get("accountId")
 knowledge_base_name = config.get("knowledge_base_name")
 s3_bucket = config.get("s3_bucket")
-s3_prefix = "docs"
+s3_prefix = f"docs/{projectName}"
 s3_image_prefix = "images"
 
 path = config.get('sharing_url', '')
-doc_prefix = "docs/"
+doc_prefix = f"docs/{projectName}/"
 
 model_name = "Claude 5.0 Sonnet"
 model_type = "claude"
@@ -1438,7 +1438,7 @@ def update_final_result(notification_queue, message):
 tool_input_list = dict()
 
 sharing_url = config["sharing_url"] if "sharing_url" in config else None
-s3_prefix = "docs"
+s3_prefix = f"docs/{projectName}"
 capture_prefix = "captures"
 
 def _sanitize_reference_text(text: str, max_len: int) -> str:

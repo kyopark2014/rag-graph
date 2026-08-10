@@ -50,7 +50,7 @@ flowchart TB
 
   subgraph Storage["Artifacts / S3 / Neptune"]
     ART[artifacts/]
-    S3[(S3 docs/)]
+    S3[(S3 docs/{projectName}/)]
     NA[(Neptune Analytics)]
   end
 
@@ -357,7 +357,7 @@ OpenClaw의 [skill-creator](./application/skills/skill-creator/SKILL.md)를 참�
 
 ```mermaid
 flowchart LR
-  S3["S3 docs/"] --> KB["Bedrock Knowledge Base"]
+    S3[(S3 docs/{projectName}/)] --> KB["Bedrock Knowledge Base"]
   KB -->|파싱·청킹·임베딩| NA["Neptune Analytics"]
   KB -->|Entity/Relation 추출| NA
   Q[사용자 질의] --> RET["bedrock-agent-runtime Retrieve"]
@@ -373,9 +373,10 @@ flowchart LR
 | 그래프 이름 | `rag-project` |
 | 용량 | 32 m-NCU (POC) |
 | 임베딩 | Titan Text Embeddings V2, 1024차원, FLOAT32 |
+| 문서 파서 | Foundation model — Claude Sonnet 4.6 |
 | 그래프 구성 모델 | Claude Haiku 4.5 (`CHUNK_ENTITY_EXTRACTION`) |
 | 청킹 | Fixed size 300 토큰 / overlap 20% |
-| 데이터 소스 | S3 `docs/` prefix |
+| 데이터 소스 | S3 `docs/{projectName}/` prefix |
 
 인제스션 시 Knowledge Base가 Document → Chunk → Entity 노드와 `PART_OF` / `HAS_ENTITY` / 동적 관계 엣지를 Neptune에 적재합니다. 검색 시에는 질문 벡터로 유사 Chunk를 찾은 뒤 Entity 그래프를 확장해 컨텍스트를 보강합니다.
 
@@ -402,14 +403,13 @@ cd graph-rag && python3 installer.py
 
 배포 시 아래를 생성·갱신합니다.
 
-1. S3 버킷 (`storage-for-rag-project-{account}-{region}`)
+1. **공용** S3 버킷 (`storage-for-rag-project-{account}-{region}`) — agent-skills 등과 공유, 없으면 생성
 2. Knowledge Base IAM 역할 — `neptune-graph:GetGraph`, `Read/Write/DeleteDataViaQuery`
-3. Neptune Analytics 그래프 + 벡터 인덱스 (차원 1024)
-4. Bedrock Knowledge Base + GraphRAG 데이터 소스 (`contextEnrichmentConfiguration`)
-5. CloudFront, AgentCore Web Search Gateway 등 공통 리소스
+3. Neptune Analytics 그래프 + 벡터 인덱스 (차원 1024) — 프로젝트 전용
+4. Bedrock Knowledge Base + GraphRAG 데이터 소스 (FM parser Sonnet 4.6, graph construction Haiku 4.5, prefix `docs/{projectName}/`) — 프로젝트 전용
+5. **공용** CloudFront (`CloudFront-for-rag-project`), AgentCore Web Search Gateway (`gateway-websearch`) — 없으면 생성·재사용
 
-
-정리 시 Knowledge Base를 먼저 삭제한 뒤 Neptune 그래프를 삭제하세요. 순서를 바꾸면 KB가 깨지거나 그래프 과금이 남을 수 있습니다.
+정리 시 Knowledge Base를 먼저 삭제한 뒤 Neptune 그래프를 삭제하세요. 순서를 바꾸면 KB가 깨지거나 그래프 과금이 남을 수 있습니다. S3 / CloudFront / Web Search Gateway는 **공용 리소스**이므로 uninstaller가 기본값 N으로 유지 여부를 묻습니다.
 
 ```bash
 python uninstaller.py --delete-knowledge-base --delete-neptune
@@ -419,9 +419,10 @@ python uninstaller.py --delete-knowledge-base --delete-neptune
 
 | 키 | 설명 |
 |----|------|
-| `knowledge_base_id` / `knowledge_base_name` | GraphRAG KB |
-| `neptune_graph_id` / `neptune_graph_arn` / `neptune_graph_name` | Neptune Analytics 그래프 |
-| `s3_bucket` / `sharing_url` | 문서 저장소 및 CloudFront |
+| `knowledge_base_id` / `knowledge_base_name` | GraphRAG KB (프로젝트 전용) |
+| `neptune_graph_id` / `neptune_graph_arn` / `neptune_graph_name` | Neptune Analytics 그래프 (프로젝트 전용) |
+| `s3_bucket` / `sharing_url` | 공용 문서 저장소 및 CloudFront |
+| `agentcore_websearch_gateway_*` | 공용 Web Search Gateway |
 
 ### 검색 경로
 
@@ -437,9 +438,109 @@ python uninstaller.py --delete-knowledge-base --delete-neptune
 
 문서 반영 절차:
 
-1. 파일을 `s3://{s3_bucket}/docs/`에 업로드
+1. 파일을 `s3://{s3_bucket}/docs/{projectName}/`에 업로드
 2. Bedrock 콘솔(또는 API)에서 Knowledge Base **Sync**
 3. Sync 완료 후 RAG / Agent(`knowledge base` MCP)로 질의
+
+### Metadata Filtering
+
+Amazon Bedrock Knowledge Bases는 원본 문서와 함께 `파일명.확장자.metadata.json`을 S3에 올리면 문서별 커스텀 메타데이터를 인덱싱할 수 있습니다. 조회 시 `Retrieve` / `RetrieveAndGenerate`의 `vectorSearchConfiguration.filter`로 사전 필터링한 뒤 유사도 검색을 수행합니다.
+
+이 프로젝트는 UI/API RAG 업로드 시 `application/services/rag_service.py`가
+`docs/{projectName}/{user_id}/{file}.metadata.json` sidecar를 함께 올립니다.
+
+#### Neptune GraphRAG에서 허용되는 타입
+
+Neptune Analytics(GraphRAG) 문서 메타데이터는 **STRING / NUMBER / BOOLEAN**만 지원합니다.
+`STRING_LIST`(list 값)는 **인제스션 시 파일이 무시**됩니다.
+
+| 속성 | 타입 | 예시 | 용도 |
+|------|------|------|------|
+| `owner` | `STRING` | `"user01"` | 업로더 `user_id` (단일 문자열) |
+| `team` | `STRING` | `"mycompany"` | 팀/조직 스코프 |
+| `created_time` | `NUMBER` | `1786366000` | Unix epoch(초). 범위 필터용 |
+| `is_confidential` | `BOOLEAN` | `false` | 기밀 여부 |
+
+> **OpenSearch용 `STRING_LIST` owner와의 차이**  
+> `agent-skills` 등 OpenSearch 기반 RAG는 `owner`를 `STRING_LIST`로 두고 `listContains`로 필터할 수 있습니다.  
+> GraphRAG(Neptune)에서는 list 속성이 거부되므로 **반드시 `STRING` + `equals` / `in`** 을 사용합니다.  
+> 구현: `build_kb_metadata_document(owner=...)` → `type: "STRING"`.
+
+메타데이터 파일 예시 (`error_code.pdf.metadata.json`):
+
+```json
+{
+  "metadataAttributes": {
+    "owner": {
+      "value": { "type": "STRING", "stringValue": "user01" },
+      "includeForEmbedding": false
+    },
+    "team": {
+      "value": { "type": "STRING", "stringValue": "mycompany" },
+      "includeForEmbedding": false
+    },
+    "created_time": {
+      "value": { "type": "NUMBER", "numberValue": 1786366000 },
+      "includeForEmbedding": false
+    },
+    "is_confidential": {
+      "value": { "type": "BOOLEAN", "booleanValue": false },
+      "includeForEmbedding": false
+    }
+  }
+}
+```
+
+조회 시 필터 예시 (`owner`는 `equals` / `in` — `listContains` 사용 금지):
+
+```python
+retrievalConfiguration={
+    "vectorSearchConfiguration": {
+        "filter": {
+            "andAll": [
+                {"equals": {"key": "owner", "value": "user01"}},
+                {"equals": {"key": "team", "value": "mycompany"}},
+            ]
+        }
+    }
+}
+```
+
+| 항목 | OpenSearch Serverless | S3 Vectors | Neptune Analytics |
+|------|----------------------|------------|-------------------|
+| `equals` / `notEquals` | ✅ | ✅ | ✅ |
+| 숫자 비교 (`>`, `<`, `>=`, `<=`) | ✅ | ✅ | ✅ |
+| `in` / `notIn` | ✅ (가장 잘 지원) | 제한적 | ✅ (잘 지원) |
+| `startsWith` | ✅ | ❌ | ✅ (가능하나 느림, 비권장) |
+| `stringContains` | ✅ | ❌ | ✅ (string만, list variant ❌) |
+| `listContains` / list형 메타데이터 | ✅ | 제한/이슈 있음 | ❌ (문서 메타에 list 속성 미지원) |
+
+#### 트러블슈팅: invalid metadata attributes
+
+Sync 실패 메시지가 아래와 같으면 sidecar의 `owner`(또는 기타 속성)가 `STRING_LIST`일 가능성이 큽니다.
+
+```text
+Ignored 1 files due to invalid metadata attributes.
+Check that the attribute keys and values don't exceed the character quota,
+and that the attribute values are acceptable data types (strings, numbers, or Booleans).
+Then retry your request [Files: s3://.../docs/graph-rag/{user}/{file}.pdf].
+Call to Customer Source did not succeed.
+```
+
+조치:
+
+1. `.metadata.json`에서 `owner`를 `STRING`(`stringValue`)으로 수정  
+2. S3에 sidecar 재업로드  
+3. Knowledge Base **Sync** 재실행  
+
+**실무 팁**
+
+- `department`, `year`, `region` 같은 카탈로그성 속성은 세 스토어 모두에서 안전하게 쓸 수 있습니다.
+- 경로 prefix·부분 문자열·태그 리스트 필터가 필요하면 OpenSearch가 가장 여유롭습니다.
+- Neptune에서는 String / Number / Boolean만 문서 메타 속성으로 권장합니다. `startsWith`보다 전용 카테고리 속성을 두고 `equals` / `in`을 쓰는 편이 지연시간에 유리합니다.
+- 새 메타데이터 속성을 추가한 뒤에는 소스 문서를 갱신하고 Knowledge Base를 **재동기화(Sync)** 해야 필터에 반영됩니다.
+
+참고: [Configure queries and response generation](https://docs.aws.amazon.com/bedrock/latest/userguide/kb-test-config.html), [Neptune GraphRAG filter best practices](https://docs.aws.amazon.com/neptune-analytics/latest/userguide/best-practices-graphrag-filters.html)
 
 ### 비용분석
 
@@ -503,13 +604,13 @@ OpenSearch Serverless RAG와 Neptune Analytics GraphRAG의 월간 운영비를 �
 git clone https://github.com/kyopark2014/graph-rag
 ```
 
-아래와 같이 installer.py를 이용해 설치를 시작합니다. Neptune Analytics 그래프와 Bedrock Knowledge Base(GraphRAG)가 함께 생성됩니다.
+아래와 같이 installer.py를 이용해 설치를 시작합니다. Neptune Analytics 그래프와 Bedrock Knowledge Base(GraphRAG)가 함께 생성됩니다. S3 / CloudFront / Web Search Gateway는 agent-skills와 동일한 공용 리소스를 재사용합니다.
 
 ```python
 cd graph-rag && python3 installer.py
 ```
 
-인프라가 더이상 필요없을 때에는 Knowledge Base를 먼저 삭제한 뒤 Neptune 그래프를 삭제합니다.
+인프라가 더이상 필요없을 때에는 Knowledge Base를 먼저 삭제한 뒤 Neptune 그래프를 삭제합니다. S3 / CloudFront / Web Search는 공용 리소스이므로 기본값이 유지(N)이며, 삭제하려면 프롬프트에서 Y를 입력하거나 `--delete-s3-bucket` / `--delete-cloudfront` / `--delete-agentcore-gateway` 플래그를 사용합니다.
 
 ```text
 python uninstaller.py --delete-knowledge-base --delete-neptune

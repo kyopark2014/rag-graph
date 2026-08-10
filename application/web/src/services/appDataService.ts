@@ -114,7 +114,7 @@ export const appDataService = {
         model_name: config.default_model,
         skills: config.default_skills,
         mcp_servers: config.default_mcp_servers,
-        memory_enabled: true,
+        memory_enabled: false,
         llm_gateway_enabled:
           Boolean(config.llm_gateway_configured) && llmGatewayReady,
       });

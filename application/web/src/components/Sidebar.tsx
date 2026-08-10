@@ -339,10 +339,16 @@ export function Sidebar({
                   disabled={!activeTask}
                   onChange={(e) => {
                     if (!activeTask) return;
-                    onPatchTask(activeTask.id, {
-                      guardrail_enabled: e.target.checked,
-                    });
-                    handleSettingApplied();
+                    const enabled = e.target.checked;
+                    void (async () => {
+                      try {
+                        await onPatchTask(activeTask.id, {
+                          guardrail_enabled: enabled,
+                        });
+                      } finally {
+                        handleSettingApplied();
+                      }
+                    })();
                   }}
                 />
               </label>
@@ -351,14 +357,20 @@ export function Sidebar({
                 <span>Memory</span>
                 <input
                   type="checkbox"
-                  checked={activeTask?.memory_enabled ?? true}
+                  checked={activeTask?.memory_enabled ?? false}
                   disabled={!activeTask}
                   onChange={(e) => {
                     if (!activeTask) return;
-                    onPatchTask(activeTask.id, {
-                      memory_enabled: e.target.checked,
-                    });
-                    handleSettingApplied();
+                    const enabled = e.target.checked;
+                    void (async () => {
+                      try {
+                        await onPatchTask(activeTask.id, {
+                          memory_enabled: enabled,
+                        });
+                      } finally {
+                        handleSettingApplied();
+                      }
+                    })();
                   }}
                 />
               </label>

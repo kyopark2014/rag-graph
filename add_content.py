@@ -149,7 +149,8 @@ def main():
     
     # File to upload
     local_file = "contents/error_code.pdf"
-    s3_key = "docs/error_code.pdf"
+    project_name = config.get("projectName", "graph-rag")
+    s3_key = f"docs/{project_name}/error_code.pdf"
     
     # Check if file exists locally
     if not os.path.exists(local_file):

@@ -30,10 +30,12 @@ def _metadata_attr(
     string_value: str | None = None,
     number_value: float | int | None = None,
     boolean_value: bool | None = None,
-    string_list_value: Sequence[str] | None = None,
     include_for_embedding: bool = False,
 ) -> dict[str, Any]:
     """Build one Bedrock KB sidecar metadata attribute.
+
+    Neptune Analytics GraphRAG supports STRING, NUMBER, and BOOLEAN only —
+    list-valued document metadata is rejected at ingestion.
 
     See: https://docs.aws.amazon.com/bedrock/latest/userguide/s3-data-source-connector.html
     """
@@ -44,10 +46,11 @@ def _metadata_attr(
         value["numberValue"] = number_value if number_value is not None else 0
     elif attr_type == "BOOLEAN":
         value["booleanValue"] = bool(boolean_value)
-    elif attr_type == "STRING_LIST":
-        value["stringListValue"] = list(string_list_value or [])
     else:
-        raise ValueError(f"Unsupported metadata type: {attr_type}")
+        raise ValueError(
+            f"Unsupported metadata type for Neptune GraphRAG: {attr_type} "
+            "(use STRING, NUMBER, or BOOLEAN)"
+        )
 
     return {
         "value": value,
@@ -57,22 +60,21 @@ def _metadata_attr(
 
 def build_kb_metadata_document(
     *,
-    owners: Sequence[str],
+    owner: str,
     team: str = DEFAULT_TEAM,
     is_confidential: bool = DEFAULT_IS_CONFIDENTIAL,
     created_time: int | float | None = None,
 ) -> dict[str, Any]:
     """Return Bedrock Knowledge Base ``.metadata.json`` body for filtering.
 
-    ``owner`` uses STRING_LIST so multiple owners can be registered.
-    All attributes set ``includeForEmbedding`` to false (filter-only).
-    ``created_time`` is a Unix epoch in seconds (NUMBER) so Retrieve can use
-    greaterThan / lessThan range filters. Requires a fresh OpenSearch index
-    so the field is mapped as numeric (not ``date``).
+    ``owner`` is a STRING (Neptune Analytics does not support STRING_LIST /
+    list-valued document metadata). All attributes set ``includeForEmbedding``
+    to false (filter-only). ``created_time`` is a Unix epoch in seconds (NUMBER)
+    so Retrieve can use greaterThan / lessThan range filters.
     """
-    owner_list = [o.strip() for o in owners if o and str(o).strip()]
-    if not owner_list:
-        raise ValueError("At least one owner is required")
+    owner_value = (owner or "").strip()
+    if not owner_value:
+        raise ValueError("owner is required")
 
     if created_time is None:
         created_time = int(datetime.now(timezone.utc).timestamp())
@@ -82,8 +84,8 @@ def build_kb_metadata_document(
     return {
         "metadataAttributes": {
             "owner": _metadata_attr(
-                "STRING_LIST",
-                string_list_value=owner_list,
+                "STRING",
+                string_value=owner_value,
                 include_for_embedding=False,
             ),
             "team": _metadata_attr(
@@ -116,8 +118,8 @@ def ingest_rag_upload(
 ) -> dict[str, Any]:
     """Upload ``file_bytes`` to S3 under the user's folder and start a KB sync.
 
-    Objects are stored at ``docs/{user_id}/{file_name}`` with a sidecar
-    ``{file_name}.metadata.json`` for Knowledge Base metadata filtering.
+    Objects are stored at ``docs/{projectName}/{user_id}/{file_name}`` with a
+    sidecar ``{file_name}.metadata.json`` for Knowledge Base metadata filtering.
 
     Raises:
         RagServiceError: when sync status cannot be checked, an ingest is
@@ -147,10 +149,14 @@ def ingest_rag_upload(
     if not upload_result:
         raise RagServiceError(500, "Failed to upload file to S3")
 
-    owner_list = list(owners) if owners else [user_id]
+    # Neptune GraphRAG metadata supports a single STRING owner (not STRING_LIST).
+    owner_candidates = [
+        str(o).strip() for o in (owners or [user_id]) if o and str(o).strip()
+    ]
+    owner_value = owner_candidates[0] if owner_candidates else user_id
     try:
         metadata_doc = build_kb_metadata_document(
-            owners=owner_list,
+            owner=owner_value,
             team=team,
             is_confidential=is_confidential,
         )

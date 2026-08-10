@@ -23,7 +23,7 @@ export function buildNewTaskDefaults(
     skills: activeTask?.skills ?? config.default_skills,
     mcp_servers: activeTask?.mcp_servers ?? config.default_mcp_servers,
     guardrail_enabled: activeTask?.guardrail_enabled ?? false,
-    memory_enabled: activeTask?.memory_enabled ?? true,
+    memory_enabled: activeTask?.memory_enabled ?? false,
     llm_gateway_enabled: activeTask?.llm_gateway_enabled ?? false,
   };
 }
@@ -33,7 +33,7 @@ export function buildFallbackTaskDefaults(config: AppConfig): CreateTaskDefaults
     model_name: config.default_model,
     skills: config.default_skills,
     mcp_servers: config.default_mcp_servers,
-    memory_enabled: true,
+    memory_enabled: false,
     llm_gateway_enabled: false,
   };
 }

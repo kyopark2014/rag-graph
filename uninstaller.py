@@ -20,15 +20,17 @@ AGENTCORE_GATEWAY_REGION = "us-east-1"
 AGENTCORE_WEBSEARCH_GATEWAY_NAME = "gateway-websearch"
 vector_index_name = project_name
 neptune_graph_name = project_name
-cloudfront_comment = f"CloudFront-for-{project_name}"
-oai_comment = f"OAI for {project_name}"
+# Shared with agent-skills / other rag-project apps
+SHARED_RAG_PROJECT = "rag-project"
+cloudfront_comment = f"CloudFront-for-{SHARED_RAG_PROJECT}"
+oai_comment = f"OAI for {SHARED_RAG_PROJECT}"
 
 sts_client = boto3.client("sts", region_name=region)
 account_id = sts_client.get_caller_identity()["Account"]
 
 knowledge_base_name = project_name
 knowledge_base_role_name = f"role-knowledge-base-for-{project_name}-{region}"
-bucket_name = f"storage-for-{project_name}-{account_id}-{region}"
+bucket_name = f"storage-for-{SHARED_RAG_PROJECT}-{account_id}-{region}"
 
 s3_client = boto3.client("s3", region_name=region)
 iam_client = boto3.client("iam", region_name=region)
@@ -663,13 +665,14 @@ def main():
         print(f"  Project:  {project_name}")
         print(f"  Region:   {region}")
         print("  Always removed: Secrets, project IAM roles (agent, agentcore memory)")
+        print("  AgentCore gateway: prompted separately (default: keep)")
         print("=" * 60)
-        print("Optional resources (prompted per resource):")
-        print(f"  S3 bucket:           {bucket_name}  (default: delete)")
-        print(f"  CloudFront:          {cloudfront_comment}  (default: delete)")
-        print(f"  Neptune graph:       {neptune_graph_name}  (default: keep)")
-        print(f"  Knowledge Base:      {knowledge_base_name}  (default: keep)")
-        print(f"  AgentCore gateway:   {AGENTCORE_WEBSEARCH_GATEWAY_NAME} ({AGENTCORE_GATEWAY_REGION})  (default: keep)")
+        print("Shared resources (prompted separately, default: keep):")
+        print(f"  S3 bucket:           {bucket_name}")
+        print(f"  CloudFront:          {cloudfront_comment}")
+        print(f"  Neptune graph:       {neptune_graph_name}")
+        print(f"  Knowledge Base:      {knowledge_base_name}")
+        print(f"  AgentCore gateway:   {AGENTCORE_WEBSEARCH_GATEWAY_NAME} ({AGENTCORE_GATEWAY_REGION})")
         print("=" * 60)
         print("NOTE: Delete Knowledge Base before Neptune graph to avoid orphan billing.")
         print("=" * 60)
@@ -686,21 +689,22 @@ def main():
         return prompt_yes_no(prompt, default=default)
 
     delete_s3_bucket = resolve(
-        args.delete_s3_bucket, f"\nDelete shared S3 bucket ({bucket_name})?", default=True
+        args.delete_s3_bucket, f"\nDelete shared S3 bucket ({bucket_name})?"
     )
     delete_cloudfront = resolve(
         args.delete_cloudfront,
         f"Delete shared CloudFront distribution ({cloudfront_comment})?",
-        default=True,
     )
     delete_neptune = resolve(
         args.delete_neptune or args.delete_opensearch,
         f"Delete Neptune Analytics graph ({neptune_graph_name})?",
     )
-    delete_knowledge_base = resolve(args.delete_knowledge_base, f"Delete shared Knowledge Base ({knowledge_base_name})?")
+    delete_knowledge_base = resolve(
+        args.delete_knowledge_base, f"Delete shared Knowledge Base ({knowledge_base_name})?"
+    )
     delete_agentcore_gateway = resolve(
         args.delete_agentcore_gateway,
-        f"Delete AgentCore Web Search gateway ({AGENTCORE_WEBSEARCH_GATEWAY_NAME})?",
+        f"Delete shared AgentCore Web Search gateway ({AGENTCORE_WEBSEARCH_GATEWAY_NAME})?",
     )
 
     start_time = time.time()

@@ -43,7 +43,7 @@ config = load_config()
 region = config.get("region", "ap-northeast-2")
 projectName = config.get("projectName", "es")
 
-s3_prefix = "docs"
+s3_prefix = f"docs/{projectName}"
 s3_image_prefix = "images"
 model_name = "Claude 4.0 Sonnet"
 s3_bucket = config.get("s3_bucket")

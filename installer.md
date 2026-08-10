@@ -50,7 +50,7 @@ vector_index_name = project_name
 - **설정**:
   - CORS 활성화 (GET, POST, PUT)
   - 퍼블릭 액세스 차단
-  - `docs/`, `artifacts/` 폴더 자동 생성
+  - `docs/{projectName}/`, `artifacts/` 폴더 자동 생성
 
 ### 2. IAM 역할
 
@@ -72,7 +72,7 @@ vector_index_name = project_name
 
 ### 5. CloudFront (S3 오리진)
 - **Comment**: `CloudFront-for-rag-project`
-- **오리진**: S3 버킷 (`docs/`, `artifacts/` 등 정적 컨텐츠 공유용)
+- **오리진**: S3 버킷 (`docs/{projectName}/`, `artifacts/` 등 정적 컨텐츠 공유용)
 - **OAI**: S3 버킷 정책으로 CloudFront 접근 허용
 - **sharing_url**: `https://{cloudfront_domain}` → `application/config.json`에 저장
 
@@ -159,7 +159,7 @@ Summary:
 
 Total deployment time: XX.XX minutes
 ================================================================
-Upload documents to s3://.../docs/ then Sync the Knowledge Base.
+Upload documents to s3://.../docs/{projectName}/ then Sync the Knowledge Base.
 Run locally: streamlit run application/app.py
 Note: CloudFront distribution may take 15-20 minutes to fully deploy
 ================================================================
@@ -168,7 +168,7 @@ Note: CloudFront distribution may take 15-20 minutes to fully deploy
 ### 주의사항
 - `application/config.json` 파일이 자동으로 업데이트됩니다 (`sharing_url`, `neptune_graph_*` 포함)
 - Gateway는 `us-east-1`에 생성되며, 애플리케이션 리전과 다를 수 있습니다
-- `docs/`, `artifacts/` 등 S3 정적 파일은 CloudFront URL로 공유됩니다
+- `docs/{projectName}/`, `artifacts/` 등 S3 정적 파일은 CloudFront URL로 공유됩니다
 - Knowledge Base 삭제 후 Neptune 그래프도 반드시 삭제하세요 (미삭제 시 과금 지속)
 - 기존 OpenSearch 기반 KB가 있으면 installer가 Neptune용으로 재생성합니다
 
