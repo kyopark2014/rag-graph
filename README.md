@@ -526,6 +526,57 @@ resp = client.execute_query(
 | 계층적 청킹 사용 시 | GraphRAG는 child chunk만 검색(parent로 치환 안 됨) |
 | 시각화 툴 | Neptune 콘솔의 오픈소스 **Graph Explorer**로도 그래프 탐색·시각화 가능(자연어 질의는 미지원, 순수 탐색용) |
 
+### RAG 적재 에러
+
+Sync job가 아래처럼만 실패하고, `failureReasons`에 구체 원인이 없는 경우가 있습니다.
+
+```text
+The server encountered an internal error while processing the request.
+```
+
+이 메시지는 Bedrock Knowledge Base 인제스션 파이프라인 내부 실패를 **일반화한 문구**입니다. IAM·S3·Neptune 설정이 정상인데도 문서 단위로 `FAILED`가 날 수 있습니다.
+
+#### 실제 사례
+
+| 항목 | 내용 |
+|---|---|
+| Knowledge Base | `rag-graph` |
+| Data Source | S3 `storage-for-rag-project-...` / prefix `docs/rag-graph/` |
+| 실패 문서 | `docs/rag-graph/{user}/nova-ug.pdf` (**약 43 MiB, 292페이지**) |
+| 통계 | documentsScanned=1, documentsFailed=1 |
+| 소요 | 약 12분 처리 후 실패 (재시도도 동일) |
+| 파이프라인 | Claude Sonnet 4.6 FM 파싱 → Haiku 4.5 `CHUNK_ENTITY_EXTRACTION` → Neptune Analytics |
+
+같은 계정·시점에 FM 파싱만 쓰는 일반 RAG(`rag-fm-parser`)는 **110 KiB** PDF를 수십 초 만에 성공했습니다. 즉 설정 오류보다 **GraphRAG(청크별 LLM 엔티티 추출) + 대용량 PDF** 조합에서 파이프라인이 깨진 케이스로 보는 것이 맞습니다.
+
+파일 상한(문서당 50 MB) 안이어도, FM 파싱·엔티티 추출·그래프 적재가 길어지면 타임아웃·스로틀·서비스 측 오류가 위 메시지로만 노출되는 경우가 많습니다. 메타데이터 형식(`STRING` / `NUMBER` / `BOOLEAN`) 오류와는 별개입니다 — 그 경우엔 `invalid metadata attributes` 문구가 나옵니다.
+
+#### 확인 방법
+
+```bash
+# Sync job 상세
+aws bedrock-agent get-ingestion-job \
+  --knowledge-base-id <KB_ID> \
+  --data-source-id <DS_ID> \
+  --ingestion-job-id <JOB_ID> \
+  --region us-west-2
+
+# 문서별 상태
+aws bedrock-agent list-knowledge-base-documents \
+  --knowledge-base-id <KB_ID> \
+  --data-source-id <DS_ID> \
+  --region us-west-2
+```
+
+세부 코드(ThrottlingException 등)가 필요하면 Knowledge Base **CloudWatch Logs**를 켠 뒤 Sync를 다시 실행하세요.
+
+#### 조치
+
+1. **문서를 쪼개기** — 챕터·수십 페이지 단위로 나눈 뒤 재업로드·Sync (가장 확실)
+2. **작은 PDF로 파이프라인 검증** — 동일 KB에서 소용량 문서가 성공하는지 확인
+3. 원인 확정이 필요하면 KB 로깅 활성화 후 재시도
+4. 텍스트만 필요하고 멀티모달 파싱이 불필요하면 파서 전략 재검토 (GraphRAG DS는 파서 변경 시 데이터소스 재생성될 수 있음 — `installer.py` 참고)
+
 
 ## 배포하기
 

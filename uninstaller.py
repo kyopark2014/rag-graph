@@ -14,7 +14,7 @@ import boto3
 from botocore.exceptions import ClientError
 
 # Configuration (must match installer.py)
-project_name = "graph-rag"
+project_name = "rag-graph"
 region = "us-west-2"
 AGENTCORE_GATEWAY_REGION = "us-east-1"
 AGENTCORE_WEBSEARCH_GATEWAY_NAME = "gateway-websearch"
