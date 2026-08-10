@@ -1,6 +1,6 @@
 # GraphRAG와 함께 Agent 구현하기
 
-Agent는 MCP뿐 아니라 [Skill](https://github.com/anthropics/skills)을 활용하여 다양한 기능을 편리하게 구현할 수 있습니다. 여기에서는 [LangGraph](https://www.langchain.com/langgraph)에서 Agent skill을 활용하는 방법에 대해 설명합니다. RAG는 Amazon Bedrock Knowledge Bases GraphRAG로 구성하며, **FastAPI + React** Web UI로 앱을 구현하고, LangGraph Agent에 MCP와 Skills를 연결합니다. 인터넷 검색은 AgentCore Gateway를 이용한 websearch를 이용해 구현됩니다.
+여기에서는 Amazon Bedrock Knowledge Bases를 이용해 GraphRAG로 구현합니다. 사용자는 **FastAPI + React** 로 구현된 Web UI로 접속하여 문서를 업로드 하고 검색할 수 있습니다. LangGraph Agent를 이용해 MCP와 Skill을 활용할 수 있습니다. 인터넷 검색은 AgentCore Gateway를 이용한 websearch를 이용해 구현됩니다.
 
 <img width="800" alt="image" src="https://github.com/user-attachments/assets/ce6878ed-62b8-420d-a04c-928c45583e57" />
 
