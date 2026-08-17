@@ -126,13 +126,13 @@ pip install "boto3>=1.43.32" "botocore>=1.43.32"
 아래와 같이 git source를 가져옵니다.
 
 ```python
-git clone https://github.com/kyopark2014/graph-rag
+git clone https://github.com/kyopark2014/rag-graph
 ```
 
 아래와 같이 installer.py를 이용해 설치를 시작합니다.
 
 ```python
-cd graph-rag && python3 installer.py
+cd rag-graph && python3 installer.py
 ```
 
 배포 시 아래를 생성·갱신합니다.
@@ -257,7 +257,7 @@ Sync 실패 메시지가 아래와 같으면 sidecar의 `owner`(또는 기타 �
 Ignored 1 files due to invalid metadata attributes.
 Check that the attribute keys and values don't exceed the character quota,
 and that the attribute values are acceptable data types (strings, numbers, or Booleans).
-Then retry your request [Files: s3://.../docs/graph-rag/{user}/{file}.pdf].
+Then retry your request [Files: s3://.../docs/rag-graph/{user}/{file}.pdf].
 Call to Customer Source did not succeed.
 ```
 
@@ -583,13 +583,13 @@ aws bedrock-agent list-knowledge-base-documents \
 아래와 같이 git source를 가져옵니다.
 
 ```python
-git clone https://github.com/kyopark2014/graph-rag
+git clone https://github.com/kyopark2014/rag-graph
 ```
 
 아래와 같이 installer.py를 이용해 설치를 시작합니다. Neptune Analytics 그래프와 Bedrock Knowledge Base(GraphRAG)가 함께 생성됩니다. S3 / CloudFront / Web Search Gateway는 agent-skills와 동일한 공용 리소스를 재사용합니다.
 
 ```python
-cd graph-rag && python3 installer.py
+cd rag-graph && python3 installer.py
 ```
 
 인프라가 더이상 필요없을 때에는 Knowledge Base를 먼저 삭제한 뒤 Neptune 그래프를 삭제합니다. S3 / CloudFront / Web Search는 공용 리소스이므로 기본값이 유지(N)이며, 삭제하려면 프롬프트에서 Y를 입력하거나 `--delete-s3-bucket` / `--delete-cloudfront` / `--delete-agentcore-gateway` 플래그를 사용합니다.
