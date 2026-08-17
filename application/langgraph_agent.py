@@ -1263,7 +1263,7 @@ async def run_langgraph_agent(
                             if 'id' in content_item and 'name' in content_item:
                                 toolUseId = content_item.get('id', '')
                                 tool_name = content_item.get('name', '')
-                                logger.info(f"tool_name: {tool_name}, toolUseId: {toolUseId}")
+                                # logger.info(f"tool_name: {tool_name}, toolUseId: {toolUseId}")
                                 if queue:
                                     queue.register_tool(toolUseId, tool_name)
                                                                     
@@ -1314,7 +1314,7 @@ async def run_langgraph_agent(
                 if tid and tname:
                     toolUseId = tid
                     tool_name = tname
-                    logger.info(f"tool_name: {tool_name}, toolUseId: {toolUseId}")
+                    # logger.info(f"tool_name: {tool_name}, toolUseId: {toolUseId}")
                     if queue:
                         queue.register_tool(toolUseId, tool_name)
                 if handled_tool_input:
