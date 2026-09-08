@@ -108,4 +108,6 @@ export interface StreamEvent {
   tool?: string;
   input?: unknown;
   toolUseId?: string;
+  /** Set on done when the user stopped the run (cancel). */
+  cancelled?: boolean;
 }
