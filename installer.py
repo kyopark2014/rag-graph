@@ -16,7 +16,7 @@ from botocore.exceptions import ClientError
 # Configuration
 project_name = "rag-graph"  # at least 3 characters
 region = "us-west-2"
-AGENTCORE_GATEWAY_REGION = "us-east-1"
+AGENTCORE_GATEWAY_REGION = "us-west-2"
 AGENTCORE_WEBSEARCH_GATEWAY_NAME = "gateway-websearch"
 AGENTCORE_WEBSEARCH_TARGET_NAME = "websearch"
 vector_index_name = project_name
